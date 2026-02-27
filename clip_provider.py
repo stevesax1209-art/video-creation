@@ -140,14 +140,19 @@ def _generate_slideshow_clip(
     for img in images:
         args += ["-loop", "1", "-t", str(secs_per), "-i", img]
 
-    concat_inputs = "".join(f"[{i}:v]" for i in range(n))
     scale_filter = (
         f"scale={width}:{height}:force_original_aspect_ratio=increase,"
         f"crop={width}:{height},setsar=1"
     )
+    # Scale/crop each image to a consistent resolution before concatenating;
+    # the concat filter requires all inputs to have identical dimensions.
+    per_image_filters = "".join(
+        f"[{i}:v]{scale_filter}[v{i}];" for i in range(n)
+    )
+    scaled_inputs = "".join(f"[v{i}]" for i in range(n))
     filter_complex = (
-        f"{concat_inputs}concat=n={n}:v=1:a=0[raw];"
-        f"[raw]{scale_filter}[out]"
+        f"{per_image_filters}"
+        f"{scaled_inputs}concat=n={n}:v=1:a=0[out]"
     )
 
     args += [
