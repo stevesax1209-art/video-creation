@@ -5,14 +5,18 @@ Freebeat-style pipeline:
   1. Upload MP3
   2. Analyze audio duration + energy per ~2.5-second segment
   3. GPT-4 Vision describes each locked character from reference photos
-  4. Scene planner generates one prompt per segment (energy-aware, arc-driven)
+  4. prompt_builder generates one structured prompt per segment with identity
+     locks, story arc, scene variety, and hard negative-prompt rules
   5. Sora generates a short clip (~5 s) per segment with identity QC + retry
   6. ffmpeg stitches clips + overlays original MP3
   7. Export final MP4
+  8. /review/<job_id> lets users flag bad clips for targeted regeneration
 """
 
+import json
 import os
 import shutil
+import subprocess
 import uuid
 import threading
 from pathlib import Path
@@ -35,8 +39,9 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).parent
-UPLOAD_FOLDER  = BASE_DIR / "uploads"
+UPLOAD_FOLDER    = BASE_DIR / "uploads"
 GENERATED_FOLDER = BASE_DIR / "generated"
+REVIEW_FOLDER    = GENERATED_FOLDER  # review data lives under GENERATED_FOLDER/<job_id>/
 
 ALLOWED_AUDIO = {"mp3"}
 ALLOWED_IMAGE = {"jpg", "jpeg", "png", "webp"}
@@ -97,6 +102,100 @@ def _cleanup_job_dir(job_dir: Path):
         pass
 
 
+def _extract_thumbnail(clip_path: str, thumb_path: str) -> bool:
+    """Extract a single JPEG thumbnail from *clip_path* at 0.8 s offset."""
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-ss", "0.8",
+                "-i", clip_path,
+                "-frames:v", "1",
+                "-q:v", "5",
+                thumb_path,
+            ],
+            capture_output=True, text=True, timeout=20,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _persist_review_data(
+    job_id: str,
+    clip_paths: list[str],
+    scenes: list[dict],
+    prompt_items: list[dict],
+    char_descs: dict,
+    mp3_path: Path,
+    model: str,
+) -> Path:
+    """
+    Copy clips, audio, and thumbnails to a persistent review directory so they
+    survive the upload-folder cleanup and can be accessed via the /review route.
+
+    Returns the review directory path.
+    """
+    review_dir = GENERATED_FOLDER / job_id
+    clips_dest  = review_dir / "clips"
+    thumbs_dest = review_dir / "thumbs"
+    clips_dest.mkdir(parents=True, exist_ok=True)
+    thumbs_dest.mkdir(parents=True, exist_ok=True)
+
+    # Copy the original MP3 so re-stitch can use it later
+    mp3_dest = review_dir / mp3_path.name
+    try:
+        shutil.copy2(str(mp3_path), str(mp3_dest))
+    except Exception:
+        pass  # Re-stitch will gracefully skip audio if missing
+
+    clip_names: list[str] = []
+    thumb_names: list[str] = []
+
+    for i, src in enumerate(clip_paths):
+        name = f"clip_{i:04d}.mp4"
+        dest = str(clips_dest / name)
+        try:
+            shutil.copy2(src, dest)
+            clip_names.append(name)
+        except Exception:
+            clip_names.append("")
+
+        # Extract thumbnail
+        thumb_name = f"thumb_{i:04d}.jpg"
+        thumb_path = str(thumbs_dest / thumb_name)
+        ok = _extract_thumbnail(src, thumb_path)
+        thumb_names.append(thumb_name if ok else "")
+
+    # Save review manifest
+    manifest = {
+        "job_id":       job_id,
+        "model":        model,
+        "char_descs":   char_descs,
+        "mp3_name":     mp3_path.name,
+        "clips":        clip_names,
+        "thumbs":       thumb_names,
+        "scenes":       scenes,
+        "prompt_items": prompt_items,
+    }
+    with open(review_dir / "manifest.json", "w") as fh:
+        json.dump(manifest, fh, indent=2)
+
+    return review_dir
+
+
+def _load_review_manifest(job_id: str) -> dict | None:
+    """Load the review manifest for *job_id*, or return None if not found."""
+    path = GENERATED_FOLDER / job_id / "manifest.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Background worker
 # ---------------------------------------------------------------------------
@@ -138,21 +237,51 @@ def _music_video_worker(
                 char_name, [str(p) for p in img_paths]
             )
 
-        # ── Step 3: Plan scenes ───────────────────────────────────────────
+        # ── Step 3: Build per-segment prompts ────────────────────────────
         _job_update(job_id, progress=14,
-                    message=f"Planning {len(segments)} cinematic scenes…")
+                    message=f"Building {len(segments)} structured prompts with identity locks…")
 
-        from scene_planner import plan_scenes
-        scenes = plan_scenes(
-            cast_key=cast_key,
-            style_key=style_key,
-            character_descriptions=char_descs,
-            audio_segments=segments,
-            lyrics=lyrics or None,
+        from scene_planner import CAST_MAP
+        from prompt_builder import build_prompts
+        characters_list = CAST_MAP.get(cast_key, ["Bryce"])
+        # Use GPT descriptions if available, else default identity lock
+        characters = {
+            c.lower(): (char_descs.get(c) or True)
+            for c in characters_list
+        }
+        # Normalize segments from audio_analyzer format to prompt_builder format
+        norm_segs = [
+            {
+                "i":     seg.get("index", i),
+                "start": seg.get("start_ms", i * 2500) / 1000.0,
+                "end":   seg.get("end_ms", (i + 1) * 2500) / 1000.0,
+            }
+            for i, seg in enumerate(segments)
+        ]
+        prompt_items = build_prompts(
+            vision_text=(
+                lyrics or
+                "A compassionate caregiver supporting elderly residents with dignity."
+            ),
+            segments=norm_segs,
+            style_preset=style_key,
+            characters=characters,
+            job_dir=str(job_dir),
         )
+        # Convert to scene dicts expected by generate_scene_clips()
+        scenes = [
+            {
+                "prompt":     item["prompt"],
+                "duration":   int(seg.get("clip_secs", 5)),
+                "characters": [c.capitalize() for c in item["character_set"]],
+                "arc":        item.get("arc", "middle"),
+                "intensity":  seg.get("intensity", "medium"),
+            }
+            for seg, item in zip(segments, prompt_items)
+        ]
 
         _job_update(job_id, progress=18,
-                    message=f"Scene plan ready – generating {len(scenes)} clips…")
+                    message=f"Prompts ready – generating {len(scenes)} clips…")
 
         # ── Step 4: Generate clips with QC ───────────────────────────────
         from sora_generator import generate_scene_clips
@@ -174,6 +303,19 @@ def _music_video_worker(
                 "Check your OPENAI_API_KEY and Sora quota."
             )
 
+        # ── Step 4b: Persist clips + thumbnails for review ────────────────
+        _job_update(job_id, progress=88,
+                    message="Extracting review thumbnails…")
+        review_dir = _persist_review_data(
+            job_id=job_id,
+            clip_paths=saved_clips,
+            scenes=scenes,
+            prompt_items=prompt_items,
+            char_descs=char_descs,
+            mp3_path=mp3_path,
+            model=model,
+        )
+
         # ── Step 5: Stitch + audio ────────────────────────────────────────
         _job_update(job_id, progress=90,
                     message=f"Stitching {len(saved_clips)} clips and adding audio…")
@@ -191,6 +333,7 @@ def _music_video_worker(
             progress=100,
             message=f"Your music video is ready! ({len(saved_clips)} scenes)",
             output=output_path.name,
+            review_url=f"/review/{job_id}",
         )
 
     except Exception as exc:
@@ -322,6 +465,197 @@ def download(job_id: str):
         download_name="music_video.mp4",
         mimetype="video/mp4",
     )
+
+
+@app.route("/review/<job_id>")
+def review(job_id: str):
+    """Manual QC review page: shows one thumbnail per clip for flagging."""
+    if not all(c in "0123456789abcdef" for c in job_id) or len(job_id) != 32:
+        abort(400)
+    manifest = _load_review_manifest(job_id)
+    if manifest is None:
+        abort(404)
+    return render_template("review.html", manifest=manifest, job_id=job_id)
+
+
+@app.route("/thumb/<job_id>/<int:idx>")
+def thumb(job_id: str, idx: int):
+    """Serve a clip thumbnail by index."""
+    if not all(c in "0123456789abcdef" for c in job_id) or len(job_id) != 32:
+        abort(400)
+    manifest = _load_review_manifest(job_id)
+    if manifest is None:
+        abort(404)
+    thumbs = manifest.get("thumbs", [])
+    if idx < 0 or idx >= len(thumbs) or not thumbs[idx]:
+        abort(404)
+    thumb_path = GENERATED_FOLDER / job_id / "thumbs" / thumbs[idx]
+    if not thumb_path.exists():
+        abort(404)
+    return send_file(str(thumb_path), mimetype="image/jpeg")
+
+
+@app.route("/regen/<job_id>", methods=["POST"])
+def regen(job_id: str):
+    """
+    Trigger targeted regeneration of specific clips.
+
+    Expects JSON body: ``{"clip_indices": [2, 5, 11]}``
+
+    Starts a background thread and returns 202 immediately.
+    Poll ``/status/<job_id>`` for status updates.
+    """
+    if not all(c in "0123456789abcdef" for c in job_id) or len(job_id) != 32:
+        abort(400)
+
+    data = request.get_json(silent=True) or {}
+    clip_indices = data.get("clip_indices", [])
+    if not isinstance(clip_indices, list) or not clip_indices:
+        return jsonify({"error": "clip_indices must be a non-empty list."}), 400
+
+    manifest = _load_review_manifest(job_id)
+    if manifest is None:
+        return jsonify({"error": "Review data not found for this job."}), 404
+
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job and job.get("status") == "regenerating":
+            return jsonify({"error": "Regeneration already in progress."}), 409
+        if job_id not in _jobs:
+            _jobs[job_id] = {}
+        _jobs[job_id].update(
+            status="regenerating", progress=0,
+            message=f"Regenerating {len(clip_indices)} clip(s)…",
+        )
+
+    threading.Thread(
+        target=_regen_worker,
+        args=(job_id, clip_indices, manifest),
+        daemon=True,
+    ).start()
+
+    return jsonify({"job_id": job_id, "regenerating": len(clip_indices)}), 202
+
+
+# ---------------------------------------------------------------------------
+# Targeted regeneration worker
+# ---------------------------------------------------------------------------
+
+def _regen_worker(job_id: str, clip_indices: list[int], manifest: dict):
+    """Regenerate specific clips and re-stitch the final video."""
+    review_dir  = GENERATED_FOLDER / job_id
+    clips_dir   = review_dir / "clips"
+    thumbs_dir  = review_dir / "thumbs"
+    output_path = GENERATED_FOLDER / f"{job_id}.mp4"
+    mp3_name    = manifest.get("mp3_name", "")
+
+    try:
+        scenes    = manifest["scenes"]
+        clip_names = manifest["clips"]
+        char_descs = manifest.get("char_descs", {})
+        model      = manifest.get("model", "sora-2")
+
+        total = len(clip_indices)
+        for step, idx in enumerate(clip_indices):
+            pct = int((step / total) * 70)
+            _job_update(job_id, progress=pct,
+                        message=f"Regenerating clip {idx + 1} ({step + 1}/{total})…")
+
+            if idx < 0 or idx >= len(scenes):
+                continue
+
+            clip_path = str(clips_dir / f"clip_{idx:04d}.mp4")
+            scene     = scenes[idx]
+
+            from sora_generator import _generate_with_qc
+            from openai import OpenAI
+            api_key = os.environ.get("OPENAI_API_KEY", "")
+            if api_key:
+                client   = OpenAI(api_key=api_key)
+                qc_char  = scene.get("characters", [None])[0]
+                qc_desc  = char_descs.get(qc_char, "") if qc_char else ""
+                ok = _generate_with_qc(
+                    client=client,
+                    prompt=scene["prompt"],
+                    duration=int(scene.get("duration", 5)),
+                    model=model,
+                    resolution="1280x720",
+                    clip_path=clip_path,
+                    qc_char=qc_char,
+                    qc_desc=qc_desc,
+                )
+            else:
+                from clip_provider import generate_clip as _stub
+                _stub(
+                    prompt=scene["prompt"],
+                    duration=int(scene.get("duration", 5)),
+                    output_path=clip_path,
+                )
+                ok = True
+
+            if ok:
+                # Refresh thumbnail
+                thumb_path = str(thumbs_dir / f"thumb_{idx:04d}.jpg")
+                _extract_thumbnail(clip_path, thumb_path)
+
+        # Re-stitch with updated clips
+        _job_update(job_id, progress=75, message="Re-stitching video with updated clips…")
+        all_clips = [
+            str(clips_dir / name)
+            for name in clip_names
+            if name and (clips_dir / name).exists()
+        ]
+        if not all_clips:
+            raise RuntimeError("No clips available to stitch after regeneration.")
+
+        # Locate the original MP3 from the upload folder (already moved to
+        # generated/<job_id>/ during persist) or skip audio if gone.
+        mp3_candidates = list((review_dir).glob("*.mp3"))
+        if not mp3_candidates and mp3_name:
+            mp3_candidates = [review_dir / mp3_name]
+
+        from video_stitcher import stitch_clips
+        mp3_file = mp3_candidates[0] if mp3_candidates and Path(mp3_candidates[0]).exists() else None
+        if mp3_file:
+            stitch_clips(
+                clip_paths=all_clips,
+                audio_path=str(mp3_file),
+                output_path=str(output_path),
+            )
+        else:
+            # No audio available – concatenate clips silently
+            from video_stitcher import _run_ffmpeg
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as fh:
+                concat_file = fh.name
+                for clip in all_clips:
+                    escaped = os.path.abspath(clip).replace("'", "'\\''")
+                    fh.write(f"file '{escaped}'\n")
+            try:
+                _run_ffmpeg([
+                    "ffmpeg", "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", concat_file,
+                    "-c:v", "libx264", "-preset", "fast",
+                    "-crf", "20", "-pix_fmt", "yuv420p",
+                    "-an",
+                    str(output_path),
+                ])
+            finally:
+                Path(concat_file).unlink(missing_ok=True)
+
+        _job_update(
+            job_id,
+            status="complete",
+            progress=100,
+            message=f"Regeneration complete – {len(clip_indices)} clip(s) updated.",
+            output=output_path.name,
+            review_url=f"/review/{job_id}",
+        )
+
+    except Exception as exc:
+        _job_update(job_id, status="error", progress=0,
+                    message=f"Regeneration error: {exc}")
 
 
 # ---------------------------------------------------------------------------
