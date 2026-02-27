@@ -1,13 +1,14 @@
 """
-AI Music Video Generator – Flask Application (Phase 1)
-=======================================================
-Accepts an MP3, optional lyrics, a cast selection with reference images
-per character, and a style preset. Orchestrates:
-  1. Audio duration analysis
-  2. GPT-4 Vision character description from reference images
-  3. AI scene planning (60–90 micro-scenes)
-  4. Sora clip generation with wider-shot fallback
-  5. ffmpeg stitch + audio overlay → final MP4
+AI Music Video Generator – Flask Application (Phase 1 / Freebeat-style)
+========================================================================
+Freebeat-style pipeline:
+  1. Upload MP3
+  2. Analyze audio duration + energy per ~2.5-second segment
+  3. GPT-4 Vision describes each locked character from reference photos
+  4. Scene planner generates one prompt per segment (energy-aware, arc-driven)
+  5. Sora generates a short clip (~5 s) per segment with identity QC + retry
+  6. ffmpeg stitches clips + overlays original MP3
+  7. Export final MP4
 """
 
 import os
@@ -34,7 +35,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).parent
-UPLOAD_FOLDER = BASE_DIR / "uploads"
+UPLOAD_FOLDER  = BASE_DIR / "uploads"
 GENERATED_FOLDER = BASE_DIR / "generated"
 
 ALLOWED_AUDIO = {"mp3"}
@@ -56,19 +57,22 @@ STYLE_OPTIONS = {
     "cinematic":   "Photorealistic Cinematic",
 }
 
-SORA_MODELS = ["sora-2", "sora-2-pro"]
+SORA_MODELS   = ["sora-2", "sora-2-pro"]
 DEFAULT_MODEL = "sora-2"
-DEFAULT_RESOLUTION = "1280x720"  # 720p landscape; Sora also supports "1920x1080"
+
+# Max characters (2) × max ref images each → ceiling for upload size calculation
+_MAX_LOCKED_CHARS = 2
 
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 GENERATED_FOLDER.mkdir(exist_ok=True)
 
 app = Flask(__name__)
-# 60 MB audio + up to 6 character images × 10 MB each
-app.config["MAX_CONTENT_LENGTH"] = (MAX_AUDIO_SIZE_MB + 6 * MAX_IMAGE_SIZE_MB) * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = (
+    MAX_AUDIO_SIZE_MB + _MAX_LOCKED_CHARS * MAX_REF_IMAGES_PER_CHAR * MAX_IMAGE_SIZE_MB
+) * 1024 * 1024
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", os.urandom(24).hex())
 
-# In-memory job store  {job_id: {"status", "progress", "message", "output"}}
+# In-memory job store {job_id: {status, progress, message, output}}
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 
@@ -108,12 +112,24 @@ def _music_video_worker(
     model: str,
 ):
     output_path = GENERATED_FOLDER / f"{job_id}.mp4"
-    clips_dir = job_dir / "clips"
+    clips_dir   = job_dir / "clips"
 
     try:
-        # ── 1. Describe characters via GPT-4 Vision ──────────────────────
-        _job_update(job_id, status="processing", progress=5,
-                    message="Analyzing character reference images…")
+        # ── Step 1: Analyze audio energy ─────────────────────────────────
+        _job_update(job_id, status="processing", progress=3,
+                    message="Analyzing audio energy and splitting into segments…")
+
+        from audio_analyzer import analyze_audio
+        audio_data = analyze_audio(str(mp3_path))
+        segments   = audio_data["segments"]
+        total_secs = audio_data["duration_secs"]
+
+        _job_update(job_id, progress=8,
+                    message=f"Audio analyzed – {len(segments)} segments over {total_secs:.0f}s")
+
+        # ── Step 2: Describe characters ───────────────────────────────────
+        _job_update(job_id, progress=10,
+                    message="Describing characters from reference images…")
 
         from scene_planner import describe_character
         char_descs: dict[str, str] = {}
@@ -122,22 +138,23 @@ def _music_video_worker(
                 char_name, [str(p) for p in img_paths]
             )
 
-        # ── 2. Plan scenes ────────────────────────────────────────────────
-        _job_update(job_id, progress=10, message="Planning cinematic scenes…")
+        # ── Step 3: Plan scenes ───────────────────────────────────────────
+        _job_update(job_id, progress=14,
+                    message=f"Planning {len(segments)} cinematic scenes…")
 
         from scene_planner import plan_scenes
         scenes = plan_scenes(
-            mp3_path=str(mp3_path),
             cast_key=cast_key,
-            lyrics=lyrics or None,
             style_key=style_key,
             character_descriptions=char_descs,
+            audio_segments=segments,
+            lyrics=lyrics or None,
         )
 
-        _job_update(job_id, progress=15,
-                    message=f"Scene plan ready – {len(scenes)} scenes to generate…")
+        _job_update(job_id, progress=18,
+                    message=f"Scene plan ready – generating {len(scenes)} clips…")
 
-        # ── 3. Generate Sora clips ────────────────────────────────────────
+        # ── Step 4: Generate clips with QC ───────────────────────────────
         from sora_generator import generate_scene_clips
 
         def _clip_progress(pct: int, msg: str):
@@ -147,15 +164,19 @@ def _music_video_worker(
             scenes=scenes,
             clips_dir=str(clips_dir),
             model=model,
-            resolution=DEFAULT_RESOLUTION,
             progress_callback=_clip_progress,
+            char_descriptions=char_descs,
         )
 
         if not saved_clips:
-            raise RuntimeError("No clips were generated. Check your OPENAI_API_KEY and Sora quota.")
+            raise RuntimeError(
+                "No clips were generated successfully. "
+                "Check your OPENAI_API_KEY and Sora quota."
+            )
 
-        # ── 4. Stitch clips + audio ───────────────────────────────────────
-        _job_update(job_id, progress=90, message="Stitching clips and adding audio…")
+        # ── Step 5: Stitch + audio ────────────────────────────────────────
+        _job_update(job_id, progress=90,
+                    message=f"Stitching {len(saved_clips)} clips and adding audio…")
 
         from video_stitcher import stitch_clips
         stitch_clips(
@@ -168,7 +189,7 @@ def _music_video_worker(
             job_id,
             status="complete",
             progress=100,
-            message=f"Your music video is ready! ({len(saved_clips)} scenes stitched)",
+            message=f"Your music video is ready! ({len(saved_clips)} scenes)",
             output=output_path.name,
         )
 
@@ -197,22 +218,21 @@ def index():
 
 @app.route("/generate", methods=["POST"])
 def generate():
-    """Validate inputs and start the music video background worker."""
+    """Validate inputs and launch the background music-video worker."""
 
-    # ── MP3 ──────────────────────────────────────────────────────────────
+    # ── MP3 ───────────────────────────────────────────────────────────────
     audio_file = request.files.get("audio")
     if not audio_file or not audio_file.filename:
         return jsonify({"error": "Please upload an MP3 file."}), 400
     if not _allowed_file(audio_file.filename, ALLOWED_AUDIO):
         return jsonify({"error": "Audio must be an MP3 file."}), 400
 
-    # ── Cast ─────────────────────────────────────────────────────────────
+    # ── Cast ──────────────────────────────────────────────────────────────
     cast_key = request.form.get("cast", "").strip()
     if cast_key not in CAST_OPTIONS:
-        return jsonify({"error": f"Invalid cast selection."}), 400
+        return jsonify({"error": "Invalid cast selection."}), 400
 
-    # ── Reference images ─────────────────────────────────────────────────
-    # Determine which characters need reference images
+    # ── Reference images ──────────────────────────────────────────────────
     from scene_planner import CAST_MAP
     characters = CAST_MAP[cast_key]
 
@@ -220,70 +240,67 @@ def generate():
     for char in characters:
         field = f"ref_{char.lower()}"
         files = [f for f in request.files.getlist(field) if f and f.filename]
-        invalid = [f for f in files if not _allowed_file(f.filename, ALLOWED_IMAGE)]
-        if invalid:
+        if any(not _allowed_file(f.filename, ALLOWED_IMAGE) for f in files):
             return jsonify({"error": f"Unsupported image format for {char}."}), 400
         if len(files) < MIN_REF_IMAGES_PER_CHAR:
             return jsonify({
-                "error": f"Please upload at least {MIN_REF_IMAGES_PER_CHAR} reference images for {char}."
+                "error": (
+                    f"Please upload at least {MIN_REF_IMAGES_PER_CHAR} "
+                    f"reference images for {char}."
+                )
             }), 400
         ref_image_files[char] = files[:MAX_REF_IMAGES_PER_CHAR]
 
-    # ── Style ─────────────────────────────────────────────────────────────
+    # ── Style + model ─────────────────────────────────────────────────────
     style_key = request.form.get("style", "cinematic").strip()
     if style_key not in STYLE_OPTIONS:
         return jsonify({"error": "Invalid style selection."}), 400
 
-    # ── Model ─────────────────────────────────────────────────────────────
     model = request.form.get("model", DEFAULT_MODEL).strip()
     if model not in SORA_MODELS:
-        return jsonify({"error": f"Invalid model."}), 400
+        return jsonify({"error": "Invalid model."}), 400
 
     # ── Lyrics (optional) ─────────────────────────────────────────────────
     lyrics = request.form.get("lyrics", "").strip()
 
     # ── Save uploads ──────────────────────────────────────────────────────
-    job_id = uuid.uuid4().hex
+    job_id  = uuid.uuid4().hex
     job_dir = UPLOAD_FOLDER / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     mp3_path = job_dir / secure_filename(audio_file.filename)
     audio_file.save(str(mp3_path))
 
-    saved_ref_paths: dict[str, list[Path]] = {}
+    saved_ref: dict[str, list[Path]] = {}
     for char, files in ref_image_files.items():
         char_dir = job_dir / f"ref_{char.lower()}"
         char_dir.mkdir(exist_ok=True)
         saved: list[Path] = []
-        for i, img_file in enumerate(files):
-            ext = img_file.filename.rsplit(".", 1)[-1].lower()
-            img_path = char_dir / f"{i:02d}.{ext}"
-            img_file.save(str(img_path))
-            saved.append(img_path)
-        saved_ref_paths[char] = saved
+        for i, img in enumerate(files):
+            ext = img.filename.rsplit(".", 1)[-1].lower()
+            p = char_dir / f"{i:02d}.{ext}"
+            img.save(str(p))
+            saved.append(p)
+        saved_ref[char] = saved
 
-    # ── Register job and start worker ─────────────────────────────────────
+    # ── Register + start worker ───────────────────────────────────────────
     with _jobs_lock:
         _jobs[job_id] = {
-            "status": "queued",
-            "progress": 0,
-            "message": "Queued…",
-            "output": None,
+            "status": "queued", "progress": 0,
+            "message": "Queued…", "output": None,
         }
 
-    thread = threading.Thread(
+    threading.Thread(
         target=_music_video_worker,
-        args=(job_id, job_dir, mp3_path, cast_key, saved_ref_paths, lyrics, style_key, model),
+        args=(job_id, job_dir, mp3_path, cast_key, saved_ref, lyrics, style_key, model),
         daemon=True,
-    )
-    thread.start()
+    ).start()
 
     return jsonify({"job_id": job_id}), 202
 
 
 @app.route("/status/<job_id>")
 def status(job_id: str):
-    """Poll for job status."""
     with _jobs_lock:
         job = _jobs.get(job_id)
     if job is None:
@@ -293,8 +310,7 @@ def status(job_id: str):
 
 @app.route("/download/<job_id>")
 def download(job_id: str):
-    """Download the generated MP4."""
-    # Validate job_id is a hex string to prevent path traversal
+    # Validate job_id – hex string only, prevents path traversal
     if not all(c in "0123456789abcdef" for c in job_id) or len(job_id) != 32:
         abort(400)
     output_path = GENERATED_FOLDER / f"{job_id}.mp4"
@@ -315,4 +331,3 @@ def download(job_id: str):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-

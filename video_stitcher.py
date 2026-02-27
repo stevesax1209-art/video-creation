@@ -90,5 +90,6 @@ def _run_ffmpeg(cmd: list[str]) -> None:
     """Run an ffmpeg command and raise RuntimeError on failure."""
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        # Surface the last 600 chars of stderr for diagnosis
-        raise RuntimeError(f"ffmpeg error: {result.stderr[-600:]}")
+        # Decode safely to avoid cut mid-sequence issues in stderr
+        stderr = result.stderr.encode("utf-8", errors="replace").decode("utf-8")[-600:]
+        raise RuntimeError(f"ffmpeg error: {stderr}")

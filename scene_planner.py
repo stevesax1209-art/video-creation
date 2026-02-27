@@ -1,15 +1,16 @@
 """
-Scene Planner: Analyzes the uploaded MP3, describes cast characters via
-GPT-4 Vision, then generates 60–90 cinematic scene prompts that follow
-a structured emotional arc and obey all V1 engine rules.
+Scene Planner: Takes energy segments from the audio analyzer, describes cast
+characters via GPT-4 Vision, then generates one cinematic Sora prompt per
+segment that:
+  - Follows a structured emotional arc
+  - Matches the segment's energy level (calm vs. dynamic visuals)
+  - Obeys all Phase 1 engine rules
 """
 
 import base64
-import json
 import math
 import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -23,16 +24,12 @@ except ImportError:
 # Engine constants
 # ---------------------------------------------------------------------------
 
-SCENE_DURATION_SECS = 3          # target seconds per Sora clip
-MIN_SCENES = 30
-MAX_SCENES = 90
-BRYCE_SCENE_FRACTION = 0.70      # Bryce must appear in ≥ 70 % of scenes
-MAX_FACES_PER_FRAME = 3
+BRYCE_SCENE_FRACTION = 0.70
 
 STYLE_DESCRIPTIONS: dict[str, str] = {
     "documentary": (
         "documentary handheld cinematography, intimate and authentic, "
-        "natural available light, slight organic camera movement, raw emotion"
+        "natural available light, slight organic camera movement"
     ),
     "cinematic": (
         "photorealistic cinematic, wide dynamic range, dramatic motivated lighting, "
@@ -46,46 +43,27 @@ CAST_MAP: dict[str, list[str]] = {
     "bryce_carmen":  ["Bryce", "Carmen"],
 }
 
-# Emotional arc: (start_fraction, end_fraction, arc_label, arc_description)
 _ARC = [
-    (0.00, 0.10, "opening",    "a quiet, intimate human moment – stillness and reflection"),
-    (0.10, 0.70, "middle",     "genuine human interaction, warmth, mutual support and presence"),
-    (0.70, 0.90, "lift",       "connection and hope, a sense of rising energy and shared purpose"),
-    (0.90, 1.00, "ending",     "relief, dignity and peace – a quiet resolution"),
+    (0.00, 0.10, "opening",  "a quiet, intimate human moment – stillness and reflection"),
+    (0.10, 0.70, "middle",   "genuine human interaction, warmth, mutual support and presence"),
+    (0.70, 0.90, "lift",     "connection and hope, a sense of rising energy and shared purpose"),
+    (0.90, 1.00, "ending",   "relief, dignity and peace – a quiet resolution"),
 ]
+
+_CAMERA_MOVES: dict[str, list[str]] = {
+    "low":    ["slow push-in", "gentle dolly forward", "static wide", "slow tilt up"],
+    "medium": ["smooth tracking shot", "subtle handheld drift", "slow pan left",
+               "gentle crane down", "soft rack focus"],
+    "high":   ["dynamic tracking", "motivated handheld", "quick push-in",
+               "energetic arc shot", "fluid dolly through"],
+}
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_audio_duration(mp3_path: str) -> float:
-    """Return MP3 duration in seconds using ffprobe (falls back to 210 s)."""
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "quiet",
-                "-print_format", "json",
-                "-show_format",
-                mp3_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            return float(data["format"]["duration"])
-    except Exception:
-        pass
-    return 210.0  # ~3.5 minutes fallback
-
-
 def describe_character(name: str, image_paths: list[str]) -> str:
-    """
-    Use GPT-4 Vision to produce a short, consistent appearance description for
-    *name* from up to 2 reference images.  Falls back to just the name.
-    """
     if not image_paths or not _openai_available:
         return name
     api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -98,15 +76,11 @@ def describe_character(name: str, image_paths: list[str]) -> str:
         try:
             with open(path, "rb") as fh:
                 b64 = base64.b64encode(fh.read()).decode()
-            # Guess MIME type from extension
             ext = Path(path).suffix.lower().lstrip(".")
             mime = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
             images_content.append({
                 "type": "image_url",
-                "image_url": {
-                    "url": f"data:{mime};base64,{b64}",
-                    "detail": "low",
-                },
+                "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "low"},
             })
         except Exception:
             continue
@@ -124,8 +98,7 @@ def describe_character(name: str, image_paths: list[str]) -> str:
                         "type": "text",
                         "text": (
                             f"Describe {name}'s consistent physical appearance in under 20 words "
-                            "for use in AI video prompts. Focus on face, hair color/style, "
-                            "skin tone, and typical clothing style. Be specific and concise."
+                            "for AI video prompts. Focus on face, hair, skin tone, clothing style."
                         ),
                     },
                     *images_content,
@@ -133,97 +106,100 @@ def describe_character(name: str, image_paths: list[str]) -> str:
             }],
             max_tokens=60,
         )
-        description = resp.choices[0].message.content.strip()
-        return f"{name} ({description})"
+        return f"{name} ({resp.choices[0].message.content.strip()})"
     except Exception:
         return name
 
 
 def plan_scenes(
-    mp3_path: str,
     cast_key: str,
-    lyrics: Optional[str],
     style_key: str,
     character_descriptions: dict[str, str],
+    audio_segments: list[dict],
+    lyrics: Optional[str] = None,
 ) -> list[dict]:
-    """
-    Return an ordered list of scene dicts, each containing:
-      - prompt:     str   – full Sora generation prompt
-      - duration:   int   – clip length in seconds
-      - characters: list  – which characters appear in this scene
-      - arc:        str   – emotional arc label
-
-    Args:
-        mp3_path:                Path to the uploaded MP3 file.
-        cast_key:                One of "bryce", "bryce_brian", "bryce_carmen".
-        lyrics:                  Optional song lyrics for sentiment context.
-        style_key:               "documentary" or "cinematic".
-        character_descriptions:  {char_name: description_string} from describe_character().
-    """
-    duration = get_audio_duration(mp3_path)
-    num_scenes = max(MIN_SCENES, min(MAX_SCENES, int(duration / SCENE_DURATION_SECS)))
-
+    """Return one scene dict per audio segment."""
     characters = CAST_MAP.get(cast_key, ["Bryce"])
     style_desc = STYLE_DESCRIPTIONS.get(style_key, STYLE_DESCRIPTIONS["cinematic"])
+    num_scenes = len(audio_segments)
+    bryce_count = math.ceil(num_scenes * BRYCE_SCENE_FRACTION)
 
-    if _openai_available and os.environ.get("OPENAI_API_KEY"):
-        scenes = _plan_with_openai(
-            num_scenes, characters, lyrics, style_desc, character_descriptions
-        )
+    if _openai_available and os.environ.get("OPENAI_API_KEY") and num_scenes > 0:
+        scene_texts = _plan_with_openai(num_scenes, characters, lyrics, style_desc, character_descriptions)
     else:
-        scenes = _plan_fallback(num_scenes, characters, style_desc, character_descriptions)
+        scene_texts = _fallback_texts(num_scenes)
+
+    secondary = [c for c in characters if c != "Bryce"]
+    scenes: list[dict] = []
+
+    for i, seg in enumerate(audio_segments):
+        arc_label = _arc_label_for(i, num_scenes)
+        intensity = seg.get("intensity", "medium")
+        camera = _pick_camera_move(intensity, i)
+
+        if i < bryce_count:
+            chars = ["Bryce"]
+            char_hint = character_descriptions.get("Bryce", "Bryce")
+        else:
+            chars = secondary or ["Bryce"]
+            char_hint = ", ".join(character_descriptions.get(c, c) for c in chars)
+
+        base_text = scene_texts[i] if i < len(scene_texts) else scene_texts[-1]
+
+        full_prompt = (
+            f"{base_text} "
+            f"Featuring {char_hint}. "
+            f"{style_desc}. "
+            f"{camera}. "
+            "Elderly seniors as dignified background figures. "
+            "No text overlays, no logos, no lip sync. "
+            "Authentic and dignified."
+        )
+
+        scenes.append({
+            "prompt":     full_prompt,
+            "duration":   int(seg.get("clip_secs", 5)),
+            "characters": chars,
+            "arc":        arc_label,
+            "intensity":  intensity,
+        })
 
     return scenes
 
 
 # ---------------------------------------------------------------------------
-# OpenAI-based scene planning
+# OpenAI
 # ---------------------------------------------------------------------------
 
-def _plan_with_openai(
-    num_scenes: int,
-    characters: list[str],
-    lyrics: Optional[str],
-    style_desc: str,
-    char_descs: dict[str, str],
-) -> list[dict]:
+def _plan_with_openai(num_scenes, characters, lyrics, style_desc, char_descs):
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-
     bryce_count = math.ceil(num_scenes * BRYCE_SCENE_FRACTION)
     secondary = [c for c in characters if c != "Bryce"]
-    secondary_count = num_scenes - bryce_count
 
-    # Build character description block for the prompt
-    char_block = "\n".join(
-        f"- {char_descs.get(c, c)}" for c in characters
-    )
-
+    char_block = "\n".join(f"- {char_descs.get(c, c)}" for c in characters)
     arc_block = "\n".join(
-        f"  Scenes {int(s * num_scenes) + 1}–{int(e * num_scenes)}: {label} – {desc}"
+        f"  Scenes {int(s * num_scenes) + 1}-{int(e * num_scenes)}: {label} - {desc}"
         for s, e, label, desc in _ARC
     )
 
     system = (
-        "You are a cinematic AI music video director creating scene descriptions "
+        "You are a cinematic AI music video director writing short scene descriptions "
         f"for a Sora text-to-video generator.\n\n"
         f"CHARACTERS:\n{char_block}\n\n"
-        f"EMOTIONAL ARC (follow strictly):\n{arc_block}\n\n"
-        "ENGINE RULES (never break):\n"
-        f"1. Bryce must appear in scenes 1–{bryce_count} (at least {bryce_count} of {num_scenes} scenes).\n"
-        f"2. Secondary characters ({', '.join(secondary) if secondary else 'none'}) may appear "
-        f"in up to {secondary_count} scenes.\n"
-        "3. Never more than 3 visible faces in any frame.\n"
-        "4. Elderly seniors appear as dignified background/support characters in several scenes.\n"
-        "5. No lip sync, no text overlays, no logos, no titles.\n"
-        f"6. Visual style: {style_desc}.\n\n"
-        f"Write EXACTLY {num_scenes} scene descriptions.\n"
-        "Each description: 1–2 cinematic sentences, max 30 words.\n"
-        "Return ONLY a numbered list, one scene per line, no extra commentary."
+        f"EMOTIONAL ARC:\n{arc_block}\n\n"
+        "RULES:\n"
+        f"1. Bryce appears in scenes 1-{bryce_count} (of {num_scenes}).\n"
+        f"2. Secondary ({', '.join(secondary) if secondary else 'none'}) in remaining scenes.\n"
+        "3. Never more than 3 visible faces per frame.\n"
+        "4. Elderly seniors as dignified background figures in some scenes.\n"
+        "5. No lip sync, no text overlays, no logos.\n\n"
+        f"Write EXACTLY {num_scenes} descriptions (max 2 sentences and max 30 words each).\n"
+        "Return ONLY a numbered list."
     )
 
     user_parts = [f"Generate {num_scenes} scene descriptions."]
     if lyrics:
-        user_parts.append(f"Song lyrics (use for emotional pacing):\n{lyrics[:3000]}")
+        user_parts.append(f"Lyrics:\n{lyrics[:3000]}")
 
     try:
         resp = client.chat.completions.create(
@@ -235,122 +211,47 @@ def _plan_with_openai(
             max_tokens=4096,
             temperature=0.8,
         )
-        raw = resp.choices[0].message.content.strip()
-        prompts = _parse_numbered_list(raw, num_scenes)
-        return _build_scene_list(
-            prompts, characters, style_desc, char_descs, num_scenes, bryce_count
-        )
+        return _parse_numbered_list(resp.choices[0].message.content.strip(), num_scenes)
     except Exception:
-        return _plan_fallback(num_scenes, characters, style_desc, char_descs)
-
-
-def _build_scene_list(
-    prompts: list[str],
-    characters: list[str],
-    style_desc: str,
-    char_descs: dict[str, str],
-    num_scenes: int,
-    bryce_count: int,
-) -> list[dict]:
-    secondary = [c for c in characters if c != "Bryce"]
-    scenes: list[dict] = []
-    for i, prompt in enumerate(prompts):
-        if i < bryce_count:
-            chars = ["Bryce"]
-            char_hint = char_descs.get("Bryce", "Bryce")
-        else:
-            chars = secondary or ["Bryce"]
-            char_hint = ", ".join(char_descs.get(c, c) for c in chars)
-
-        arc_label = _arc_label_for(i, num_scenes)
-        full_prompt = (
-            f"{prompt} "
-            f"Featuring {char_hint}. "
-            f"{style_desc}. "
-            "Elderly seniors as dignified background figures. "
-            "No text overlays, no logos, no lip sync. "
-            "Authentic and dignified."
-        )
-        scenes.append({
-            "prompt": full_prompt,
-            "duration": SCENE_DURATION_SECS,
-            "characters": chars,
-            "arc": arc_label,
-        })
-    return scenes
+        return _fallback_texts(num_scenes)
 
 
 # ---------------------------------------------------------------------------
-# Rule-based fallback
+# Fallback
 # ---------------------------------------------------------------------------
 
-_FALLBACK_ARCS = {
+_FALLBACK_BY_ARC = {
     "opening": [
-        "Bryce sits quietly in a softly lit room, hands folded, morning light through a window.",
-        "A close-up of Bryce's face, contemplative, gentle ambient noise.",
-        "Bryce stands at a window looking out, soft golden morning light.",
+        "Bryce sits quietly in a softly lit room, hands folded, morning light.",
+        "Close-up of Bryce's face, contemplative, gentle ambient stillness.",
     ],
     "middle": [
-        "Bryce walks slowly through a community center hallway, nodding to passing elders.",
-        "Bryce and an elderly woman share a warm, silent moment seated at a table.",
+        "Bryce walks slowly through a community center, nodding to passing elders.",
+        "Bryce and an elderly person share a warm, silent moment at a table.",
         "Wide shot of a garden courtyard, seniors in background, Bryce in foreground.",
-        "Bryce gently assists an elder with a gentle touch on their shoulder.",
-        "Elderly seniors gathered in soft afternoon light, Bryce among them.",
-        "Bryce listening attentively, leaning forward with genuine care.",
+        "Bryce gently places a hand on an elder's shoulder in a caring gesture.",
+        "Bryce leans forward attentively, genuine care in his expression.",
     ],
     "lift": [
         "Bryce and an elder laugh softly together, a moment of shared joy.",
-        "Wide shot, Bryce and a group of seniors walking outside in warm sunlight.",
-        "Bryce smiles warmly, seniors in background, a sense of rising hope.",
+        "Wide shot, Bryce and seniors walking outside in warm sunlight.",
     ],
     "ending": [
         "Bryce seated in quiet dignity, late afternoon golden light, peaceful.",
-        "A wide, still shot – Bryce and elderly figures in a calm garden, fading light.",
         "Close-up of hands, young and old, resting together in quiet solidarity.",
     ],
 }
 
 
-def _plan_fallback(
-    num_scenes: int,
-    characters: list[str],
-    style_desc: str,
-    char_descs: dict[str, str],
-) -> list[dict]:
-    bryce_count = math.ceil(num_scenes * BRYCE_SCENE_FRACTION)
-    bryce_desc = char_descs.get("Bryce", "Bryce")
-    secondary = [c for c in characters if c != "Bryce"]
-
-    scenes: list[dict] = []
-    arc_pool: dict[str, int] = {k: 0 for k in _FALLBACK_ARCS}
-
+def _fallback_texts(num_scenes: int) -> list[str]:
+    texts: list[str] = []
+    idx: dict[str, int] = {k: 0 for k in _FALLBACK_BY_ARC}
     for i in range(num_scenes):
-        arc_label = _arc_label_for(i, num_scenes)
-        arc_templates = _FALLBACK_ARCS[arc_label]
-        template = arc_templates[arc_pool[arc_label] % len(arc_templates)]
-        arc_pool[arc_label] += 1
-
-        if i < bryce_count:
-            chars = ["Bryce"]
-            char_hint = bryce_desc
-        else:
-            chars = secondary or ["Bryce"]
-            char_hint = ", ".join(char_descs.get(c, c) for c in chars)
-
-        full_prompt = (
-            f"{template} "
-            f"Featuring {char_hint}. "
-            f"{style_desc}. "
-            "Elderly seniors as dignified background figures. "
-            "No text overlays, no logos, no lip sync."
-        )
-        scenes.append({
-            "prompt": full_prompt,
-            "duration": SCENE_DURATION_SECS,
-            "characters": chars,
-            "arc": arc_label,
-        })
-    return scenes
+        arc = _arc_label_for(i, num_scenes)
+        pool = _FALLBACK_BY_ARC[arc]
+        texts.append(pool[idx[arc] % len(pool)])
+        idx[arc] += 1
+    return texts
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +266,11 @@ def _arc_label_for(scene_index: int, num_scenes: int) -> str:
     return "ending"
 
 
+def _pick_camera_move(intensity: str, seed: int) -> str:
+    moves = _CAMERA_MOVES.get(intensity, _CAMERA_MOVES["medium"])
+    return moves[seed % len(moves)]
+
+
 def _parse_numbered_list(raw: str, num_scenes: int) -> list[str]:
     lines = raw.splitlines()
     prompts: list[str] = []
@@ -373,7 +279,7 @@ def _parse_numbered_list(raw: str, num_scenes: int) -> list[str]:
         cleaned = re.sub(r"^\s*[-*]\s*", "", cleaned).strip()
         if cleaned:
             prompts.append(cleaned)
-    fallback = "Bryce in a quiet moment, cinematic warm light, elderly figures in background."
+    fallback = "Bryce in a quiet moment, cinematic warm light."
     while len(prompts) < num_scenes:
         prompts.append(prompts[-1] if prompts else fallback)
     return prompts[:num_scenes]

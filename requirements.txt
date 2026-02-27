@@ -2,4 +2,5 @@ flask==3.0.3
 werkzeug==3.0.3
 openai>=1.55.0
 requests>=2.31.0
+pydub>=0.25.1
 python-dotenv==1.0.1
