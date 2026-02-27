@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🔍 Clip Review – {{ job_id[:8] | e }}…</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+  <style>
+    .review-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    .clip-card {
+      background: var(--surface2);
+      border: 2px solid #2d2d50;
+      border-radius: var(--radius);
+      overflow: hidden;
+      transition: border-color var(--transition);
+      cursor: pointer;
+      position: relative;
+    }
+
+    .clip-card.flagged {
+      border-color: var(--accent);
+      background: rgba(233, 69, 96, 0.08);
+    }
+
+    .clip-card img {
+      width: 100%;
+      aspect-ratio: 16/9;
+      object-fit: cover;
+      display: block;
+      background: #111;
+    }
+
+    .clip-card .no-thumb {
+      width: 100%;
+      aspect-ratio: 16/9;
+      background: #1a1a2e;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+
+    .clip-card .clip-meta {
+      padding: 0.6rem 0.75rem;
+    }
+
+    .clip-meta .clip-index {
+      font-weight: 700;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    .clip-meta .clip-chars {
+      font-size: 0.75rem;
+      color: var(--accent);
+      margin-top: 0.2rem;
+    }
+
+    .clip-meta .clip-time {
+      font-size: 0.7rem;
+      color: var(--muted);
+      margin-top: 0.15rem;
+    }
+
+    .clip-card .flag-check {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 22px;
+      height: 22px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    .flag-label {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      background: rgba(233,69,96,0.85);
+      color: #fff;
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      display: none;
+    }
+
+    .clip-card.flagged .flag-label { display: block; }
+
+    .action-bar {
+      position: sticky;
+      bottom: 0;
+      background: var(--surface);
+      border-top: 1px solid #2d2d50;
+      padding: 1rem 1.25rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+      z-index: 10;
+    }
+
+    .flag-count {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .flag-count strong { color: var(--text); }
+
+    #regen-status {
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .progress-bar-track {
+      height: 6px;
+      background: #2d2d50;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 0.5rem;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 3px;
+      transition: width 0.4s ease;
+      width: 0%;
+    }
+  </style>
+</head>
+<body>
+  <div class="page-wrapper">
+
+    <header class="hero">
+      <div class="hero-inner">
+        <h1>🔍 Clip Review</h1>
+        <p class="hero-sub">
+          Check each thumbnail. Flag any clip where Bryce doesn't look right, then
+          click&nbsp;<strong>Regenerate Flagged Clips</strong>.
+        </p>
+      </div>
+    </header>
+
+    <main class="container">
+
+      <!-- Summary card -->
+      <section class="card">
+        <h2>Job <code style="font-size:0.85em">{{ job_id[:8] }}…</code></h2>
+        <p class="hint">
+          {{ manifest.clips | length }} clip(s) ·
+          {% set chars = manifest.char_descs.keys() | list %}
+          Characters: {{ chars | join(', ') if chars else 'Bryce' }}
+        </p>
+        <div style="margin-top:0.75rem; display:flex; gap:0.75rem; flex-wrap:wrap;">
+          <a href="/download/{{ job_id }}" class="btn-primary" style="text-decoration:none; display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1.1rem; border-radius:8px; font-size:0.9rem; font-weight:600;">
+            ⬇️ Download Current Video
+          </a>
+          <a href="/" class="btn-secondary" style="text-decoration:none; display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1.1rem; border-radius:8px; font-size:0.9rem;">
+            ← Make Another Video
+          </a>
+        </div>
+      </section>
+
+      <!-- Clip grid -->
+      <section class="card">
+        <h2>Clip Thumbnails</h2>
+        <p class="hint">Click a thumbnail (or the checkbox) to flag it for regeneration.</p>
+
+        <div class="review-grid" id="clip-grid">
+          {% for i in range(manifest.clips | length) %}
+          {% set scene = manifest.scenes[i] if i < manifest.scenes | length else {} %}
+          {% set item  = manifest.prompt_items[i] if i < manifest.prompt_items | length else {} %}
+          {% set thumb = manifest.thumbs[i] if i < manifest.thumbs | length else '' %}
+          <div class="clip-card" id="card-{{ i }}" onclick="toggleFlag({{ i }})">
+            <span class="flag-label">⚑ Flagged</span>
+            <input type="checkbox" class="flag-check" id="flag-{{ i }}"
+                   onclick="event.stopPropagation(); toggleFlagCheck({{ i }})" />
+            {% if thumb %}
+            <img src="/thumb/{{ job_id }}/{{ i }}"
+                 alt="Clip {{ i }} thumbnail"
+                 loading="lazy" />
+            {% else %}
+            <div class="no-thumb">No thumbnail</div>
+            {% endif %}
+            <div class="clip-meta">
+              <div class="clip-index">Clip #{{ i }}</div>
+              <div class="clip-chars">
+                {{ (scene.get('characters') or item.get('character_set') or ['Bryce']) | join(', ') }}
+              </div>
+              {% if item.get('start') is not none and item.get('end') is not none %}
+              <div class="clip-time">{{ "%.1f"|format(item.start) }}s – {{ "%.1f"|format(item.end) }}s</div>
+              {% endif %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Sticky action bar -->
+    <div class="action-bar">
+      <span class="flag-count"><strong id="flag-count-num">0</strong> clip(s) flagged</span>
+      <button id="regen-btn" class="btn-primary" onclick="startRegen()" disabled
+              style="padding:0.6rem 1.25rem; font-size:0.9rem;">
+        🔄 Regenerate Flagged Clips
+      </button>
+      <span id="regen-status"></span>
+    </div>
+
+    <!-- Progress bar (shown during regen) -->
+    <div id="regen-progress-wrap" style="display:none; padding:0 1.25rem 1rem;">
+      <div class="progress-bar-track">
+        <div class="progress-bar-fill" id="regen-progress-bar"></div>
+      </div>
+    </div>
+
+    <footer class="footer">
+      <p>For personal use only. Only generate content you have the right to create.</p>
+    </footer>
+
+  </div>
+
+  <script>
+    const JOB_ID = "{{ job_id }}";
+    const flagged = new Set();
+
+    function toggleFlag(idx) {
+      if (flagged.has(idx)) {
+        flagged.delete(idx);
+        document.getElementById('card-' + idx).classList.remove('flagged');
+        document.getElementById('flag-' + idx).checked = false;
+      } else {
+        flagged.add(idx);
+        document.getElementById('card-' + idx).classList.add('flagged');
+        document.getElementById('flag-' + idx).checked = true;
+      }
+      updateBar();
+    }
+
+    function toggleFlagCheck(idx) {
+      // Checkbox click – sync with card state
+      const checked = document.getElementById('flag-' + idx).checked;
+      if (checked) {
+        flagged.add(idx);
+        document.getElementById('card-' + idx).classList.add('flagged');
+      } else {
+        flagged.delete(idx);
+        document.getElementById('card-' + idx).classList.remove('flagged');
+      }
+      updateBar();
+    }
+
+    function updateBar() {
+      document.getElementById('flag-count-num').textContent = flagged.size;
+      document.getElementById('regen-btn').disabled = (flagged.size === 0);
+    }
+
+    function startRegen() {
+      if (flagged.size === 0) return;
+      document.getElementById('regen-btn').disabled = true;
+      document.getElementById('regen-status').textContent = 'Submitting…';
+      document.getElementById('regen-progress-wrap').style.display = 'block';
+
+      fetch('/regen/' + JOB_ID, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({clip_indices: Array.from(flagged)}),
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          document.getElementById('regen-status').textContent = '❌ ' + data.error;
+          document.getElementById('regen-btn').disabled = false;
+          return;
+        }
+        pollRegen();
+      })
+      .catch(err => {
+        document.getElementById('regen-status').textContent = '❌ Network error.';
+        document.getElementById('regen-btn').disabled = false;
+      });
+    }
+
+    function pollRegen() {
+      fetch('/status/' + JOB_ID)
+        .then(r => r.json())
+        .then(data => {
+          const pct = data.progress || 0;
+          document.getElementById('regen-progress-bar').style.width = pct + '%';
+          document.getElementById('regen-status').textContent = data.message || '';
+
+          if (data.status === 'complete') {
+            document.getElementById('regen-status').textContent = '✅ ' + (data.message || 'Done!');
+            // Reload thumbnails for regenerated clips
+            flagged.forEach(idx => {
+              const img = document.querySelector('#card-' + idx + ' img');
+              if (img) img.src = img.src.split('?')[0] + '?v=' + Date.now();
+            });
+            flagged.clear();
+            updateBar();
+            document.getElementById('regen-btn').disabled = false;
+          } else if (data.status === 'error') {
+            document.getElementById('regen-status').textContent = '❌ ' + (data.message || 'Error.');
+            document.getElementById('regen-btn').disabled = false;
+          } else {
+            setTimeout(pollRegen, 5000);
+          }
+        })
+        .catch(() => setTimeout(pollRegen, 8000));
+    }
+  </script>
+</body>
+</html>

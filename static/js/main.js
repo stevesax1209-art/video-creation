@@ -200,7 +200,7 @@ function startPolling(jobId) {
       if (!res.ok) return;
       const job = await res.json();
       setProgress(job.progress, job.message);
-      if (job.status === "complete") { clearPoll(); showResult(jobId); }
+      if (job.status === "complete") { clearPoll(); showResult(jobId, job.review_url); }
       else if (job.status === "error") { clearPoll(); showError(job.message); }
     } catch (_) {}
   }, POLL_INTERVAL);
@@ -213,8 +213,18 @@ function setProgress(pct, msg) {
 }
 
 // ── Result / error ────────────────────────────────────────────────────────
-function showResult(jobId) {
+const reviewLink = document.getElementById("review-link");
+
+function showResult(jobId, reviewUrl) {
   downloadLink.href = `/download/${jobId}`;
+  if (reviewLink) {
+    if (reviewUrl) {
+      reviewLink.href = reviewUrl;
+      reviewLink.style.display = "inline-flex";
+    } else {
+      reviewLink.style.display = "none";
+    }
+  }
   progressPanel.classList.add("hidden");
   resultPanel.classList.remove("hidden");
 }
