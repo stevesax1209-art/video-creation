@@ -1,17 +1,14 @@
 """
-Music Video Generator – Flask Application
-==========================================
-Allows users to upload an MP3 audio track, up to 6 images, and a
-2500-word max description of their vision.  AI-generated scene
-captions are applied as on-screen overlays and the result is an
-MP4 music video available for download.
+Sora Cinematic Video Generator – Flask Application
+===================================================
+Accepts a text prompt together with model, resolution, and duration
+preferences, submits a generation job to OpenAI Sora, polls for
+completion, stores the resulting MP4 locally, and serves a download link.
 """
 
 import os
 import uuid
 import threading
-import json
-import time
 from pathlib import Path
 
 from flask import (
@@ -22,7 +19,6 @@ from flask import (
     send_file,
     abort,
 )
-from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -32,22 +28,22 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).parent
-UPLOAD_FOLDER = BASE_DIR / "uploads"
 GENERATED_FOLDER = BASE_DIR / "generated"
 
-ALLOWED_AUDIO = {"mp3"}
-ALLOWED_IMAGE = {"jpg", "jpeg", "png", "gif", "webp"}
+SORA_MODELS = ["sora-2", "sora-2-pro"]
+SORA_RESOLUTIONS = ["1280x720", "720x1280"]
+DEFAULT_MODEL = "sora-2"
+DEFAULT_RESOLUTION = "1280x720"
+SORA_DURATION_MIN = 1
+SORA_DURATION_MAX = 20
+SORA_DURATION_DEFAULT = 10
 
-MAX_IMAGES = 6
-MAX_DESCRIPTION_WORDS = 2500
-MAX_AUDIO_SIZE_MB = 50
-MAX_IMAGE_SIZE_MB = 10
+MAX_PROMPT_WORDS = 2500
 
-UPLOAD_FOLDER.mkdir(exist_ok=True)
 GENERATED_FOLDER.mkdir(exist_ok=True)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = (MAX_AUDIO_SIZE_MB + MAX_IMAGES * MAX_IMAGE_SIZE_MB) * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB – text only
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", os.urandom(24).hex())
 
 # In-memory job store  {job_id: {"status": ..., "progress": ..., "message": ..., "output": ...}}
@@ -59,10 +55,6 @@ _jobs_lock = threading.Lock()
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _allowed_file(filename: str, allowed: set) -> bool:
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in allowed
-
-
 def _word_count(text: str) -> int:
     return len(text.split())
 
@@ -72,54 +64,45 @@ def _job_update(job_id: str, **kwargs):
         _jobs[job_id].update(kwargs)
 
 
-def _cleanup_uploads(paths: list[Path]):
-    """Remove temporary upload files."""
-    for p in paths:
-        try:
-            p.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
 # ---------------------------------------------------------------------------
-# Background video generation worker
+# Background Sora worker
 # ---------------------------------------------------------------------------
 
-def _generate_worker(
+def _sora_worker(
     job_id: str,
-    audio_path: Path,
-    image_paths: list[Path],
-    description: str,
+    prompt: str,
+    model: str,
+    resolution: str,
+    duration: int,
     output_path: Path,
 ):
-    """Run in a background thread; updates job status as it progresses."""
+    """Run in a background thread; submits to Sora and polls until complete."""
     try:
-        _job_update(job_id, status="processing", progress=10, message="Analyzing your vision with AI…")
+        _job_update(job_id, status="processing", progress=10, message="Connecting to Sora…")
 
-        from ai_processor import generate_scene_prompts
-        captions = generate_scene_prompts(description, len(image_paths))
+        from sora_generator import create_sora_video
 
-        _job_update(job_id, progress=30, message="Building video scenes…")
+        def _progress(pct: int, msg: str):
+            _job_update(job_id, progress=pct, message=msg)
 
-        from video_generator import generate_video
-        generate_video(
-            audio_path=str(audio_path),
-            image_paths=[str(p) for p in image_paths],
-            captions=captions,
+        create_sora_video(
+            prompt=prompt,
             output_path=str(output_path),
+            model=model,
+            resolution=resolution,
+            duration=duration,
+            progress_callback=_progress,
         )
 
         _job_update(
             job_id,
             status="complete",
             progress=100,
-            message="Your music video is ready!",
+            message="Your cinematic video is ready!",
             output=output_path.name,
         )
     except Exception as exc:
         _job_update(job_id, status="error", progress=0, message=f"Error: {exc}")
-    finally:
-        _cleanup_uploads([audio_path] + image_paths)
 
 
 # ---------------------------------------------------------------------------
@@ -128,62 +111,57 @@ def _generate_worker(
 
 @app.route("/")
 def index():
-    return render_template("index.html", max_images=MAX_IMAGES, max_words=MAX_DESCRIPTION_WORDS)
+    return render_template(
+        "index.html",
+        sora_models=SORA_MODELS,
+        sora_resolutions=SORA_RESOLUTIONS,
+        default_model=DEFAULT_MODEL,
+        duration_min=SORA_DURATION_MIN,
+        duration_max=SORA_DURATION_MAX,
+        duration_default=SORA_DURATION_DEFAULT,
+        max_words=MAX_PROMPT_WORDS,
+    )
 
 
 @app.route("/generate", methods=["POST"])
 def generate():
-    """Accept uploads and kick off background video generation."""
+    """Validate the prompt and settings, then kick off a Sora generation job."""
 
-    # --- Validate audio ---
-    if "audio" not in request.files:
-        return jsonify({"error": "No audio file uploaded."}), 400
-    audio_file = request.files["audio"]
-    if not audio_file.filename or not _allowed_file(audio_file.filename, ALLOWED_AUDIO):
-        return jsonify({"error": "Please upload a valid MP3 file."}), 400
+    # --- Prompt ---
+    prompt = request.form.get("prompt", "").strip()
+    if not prompt:
+        return jsonify({"error": "Please provide a video prompt."}), 400
+    if _word_count(prompt) > MAX_PROMPT_WORDS:
+        return jsonify({"error": f"Prompt exceeds {MAX_PROMPT_WORDS} words."}), 400
 
-    # --- Validate images ---
-    image_files = request.files.getlist("images")
-    image_files = [f for f in image_files if f and f.filename]
-    if not image_files:
-        return jsonify({"error": "Please upload at least one image."}), 400
-    if len(image_files) > MAX_IMAGES:
-        return jsonify({"error": f"Maximum {MAX_IMAGES} images allowed."}), 400
-    for img in image_files:
-        if not _allowed_file(img.filename, ALLOWED_IMAGE):
-            return jsonify({"error": f"Unsupported image format: {img.filename}"}), 400
+    # --- Model ---
+    model = request.form.get("model", "sora-2").strip()
+    if model not in SORA_MODELS:
+        return jsonify({"error": f"Invalid model. Choose from: {', '.join(SORA_MODELS)}."}), 400
 
-    # --- Validate description ---
-    description = request.form.get("description", "").strip()
-    if not description:
-        return jsonify({"error": "Please provide a vision description."}), 400
-    if _word_count(description) > MAX_DESCRIPTION_WORDS:
-        return jsonify({"error": f"Description exceeds {MAX_DESCRIPTION_WORDS} words."}), 400
+    # --- Resolution ---
+    resolution = request.form.get("resolution", "1280x720").strip()
+    if resolution not in SORA_RESOLUTIONS:
+        return jsonify({"error": f"Invalid resolution. Choose from: {', '.join(SORA_RESOLUTIONS)}."}), 400
 
-    # --- Save files ---
-    job_id = uuid.uuid4().hex
-    job_dir = UPLOAD_FOLDER / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-
-    audio_path = job_dir / secure_filename(audio_file.filename)
-    audio_file.save(str(audio_path))
-
-    saved_images: list[Path] = []
-    for i, img_file in enumerate(image_files):
-        ext = img_file.filename.rsplit(".", 1)[-1].lower()
-        img_path = job_dir / f"image_{i:02d}.{ext}"
-        img_file.save(str(img_path))
-        saved_images.append(img_path)
-
-    output_path = GENERATED_FOLDER / f"{job_id}.mp4"
+    # --- Duration ---
+    try:
+        duration = int(request.form.get("duration", SORA_DURATION_DEFAULT))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Duration must be an integer."}), 400
+    if not (SORA_DURATION_MIN <= duration <= SORA_DURATION_MAX):
+        return jsonify({"error": f"Duration must be between {SORA_DURATION_MIN} and {SORA_DURATION_MAX} seconds."}), 400
 
     # --- Register job and start background thread ---
+    job_id = uuid.uuid4().hex
+    output_path = GENERATED_FOLDER / f"{job_id}.mp4"
+
     with _jobs_lock:
         _jobs[job_id] = {"status": "queued", "progress": 0, "message": "Queued…", "output": None}
 
     thread = threading.Thread(
-        target=_generate_worker,
-        args=(job_id, audio_path, saved_images, description, output_path),
+        target=_sora_worker,
+        args=(job_id, prompt, model, resolution, duration, output_path),
         daemon=True,
     )
     thread.start()
@@ -213,7 +191,7 @@ def download(job_id: str):
     return send_file(
         str(output_path),
         as_attachment=True,
-        download_name="music_video.mp4",
+        download_name="sora_video.mp4",
         mimetype="video/mp4",
     )
 

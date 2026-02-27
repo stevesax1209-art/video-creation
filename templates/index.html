@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>🎵 AI Music Video Generator</title>
+  <title>🎬 Sora Cinematic Video Generator</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 </head>
 <body>
@@ -12,69 +12,29 @@
     <!-- Header -->
     <header class="hero">
       <div class="hero-inner">
-        <h1>🎬 AI Music Video Generator</h1>
+        <h1>🎬 Sora Cinematic Video Generator</h1>
         <p class="hero-sub">
-          Upload your song, share up to 6 photos, and describe your vision —
-          we'll turn it into an&nbsp;MP4 music video.
+          Describe your vision, choose your settings, and let OpenAI Sora
+          generate a&nbsp;cinematic&nbsp;MP4 video for you.
         </p>
       </div>
     </header>
 
     <!-- Main form -->
     <main class="container" id="main-content">
-      <form id="upload-form" enctype="multipart/form-data" novalidate>
+      <form id="upload-form" novalidate>
 
-        <!-- Step 1: Audio -->
-        <section class="card" id="step-audio">
+        <!-- Step 1: Prompt -->
+        <section class="card" id="step-prompt">
           <div class="step-badge">1</div>
-          <h2>Upload Your Song</h2>
-          <p class="hint">MP3 format only · Max {{ (50) }}MB · Must be original or non-copyrighted music</p>
-          <label class="drop-zone" id="audio-drop" for="audio-input">
-            <span class="drop-icon">🎵</span>
-            <span class="drop-text" id="audio-label">Click or drag &amp; drop your MP3 here</span>
-            <input
-              type="file"
-              id="audio-input"
-              name="audio"
-              accept=".mp3,audio/mpeg"
-              required
-              hidden
-            />
-          </label>
-        </section>
-
-        <!-- Step 2: Images -->
-        <section class="card" id="step-images">
-          <div class="step-badge">2</div>
-          <h2>Upload Photos</h2>
-          <p class="hint">Up to {{ max_images }} images · JPG, PNG, GIF or WebP · Max 10MB each</p>
-          <label class="drop-zone" id="images-drop" for="images-input">
-            <span class="drop-icon">📸</span>
-            <span class="drop-text" id="images-label">Click or drag &amp; drop up to {{ max_images }} photos here</span>
-            <input
-              type="file"
-              id="images-input"
-              name="images"
-              accept=".jpg,.jpeg,.png,.gif,.webp,image/*"
-              multiple
-              required
-              hidden
-            />
-          </label>
-          <div class="preview-grid" id="preview-grid"></div>
-        </section>
-
-        <!-- Step 3: Description -->
-        <section class="card" id="step-description">
-          <div class="step-badge">3</div>
-          <h2>Describe Your Vision</h2>
-          <p class="hint">Tell us the mood, story, or aesthetic you want — max {{ max_words }} words</p>
+          <h2>Describe Your Video</h2>
+          <p class="hint">Write a cinematic scene description — max {{ max_words }} words</p>
           <textarea
-            id="description"
-            name="description"
+            id="prompt"
+            name="prompt"
             rows="8"
             maxlength="20000"
-            placeholder="Example: A cinematic journey through a summer road trip with friends. Warm golden-hour lighting, carefree laughter, and a feeling of endless possibility…"
+            placeholder="Example: A sweeping aerial shot over misty mountain peaks at golden hour, epic orchestral mood, slow cinematic pan revealing a lone hiker on a rocky ridge…"
             required
           ></textarea>
           <div class="word-counter">
@@ -82,10 +42,50 @@
           </div>
         </section>
 
+        <!-- Step 2: Settings -->
+        <section class="card" id="step-settings">
+          <div class="step-badge">2</div>
+          <h2>Video Settings</h2>
+
+          <div class="settings-grid">
+
+            <div class="setting-group">
+              <label for="model-select">Model</label>
+              <select id="model-select" name="model">
+                {% for m in sora_models %}
+                <option value="{{ m }}"{% if m == default_model %} selected{% endif %}>{{ m }}</option>
+                {% endfor %}
+              </select>
+            </div>
+
+            <div class="setting-group">
+              <label for="resolution-select">Resolution</label>
+              <select id="resolution-select" name="resolution">
+                <option value="1280x720" selected>1280×720 — Landscape (default)</option>
+                <option value="720x1280">720×1280 — Vertical</option>
+              </select>
+            </div>
+
+            <div class="setting-group">
+              <label for="duration-input">Duration (seconds)</label>
+              <input
+                type="number"
+                id="duration-input"
+                name="duration"
+                min="{{ duration_min }}"
+                max="{{ duration_max }}"
+                value="{{ duration_default }}"
+              />
+              <span class="hint">{{ duration_min }}–{{ duration_max }} seconds</span>
+            </div>
+
+          </div>
+        </section>
+
         <!-- Submit -->
         <div class="submit-row">
           <button type="submit" id="submit-btn" class="btn-primary">
-            🎬 Generate My Music Video
+            🎬 Generate Cinematic Video
           </button>
         </div>
 
@@ -93,7 +93,7 @@
 
       <!-- Progress panel (hidden until generation starts) -->
       <div class="card progress-panel hidden" id="progress-panel">
-        <h2>⏳ Generating Your Video…</h2>
+        <h2>⏳ Sora Is Generating Your Video…</h2>
         <div class="progress-bar-track">
           <div class="progress-bar-fill" id="progress-bar"></div>
         </div>
@@ -103,12 +103,12 @@
       <!-- Result panel (hidden until complete) -->
       <div class="card result-panel hidden" id="result-panel">
         <span class="result-icon">🎉</span>
-        <h2>Your Music Video Is Ready!</h2>
-        <p>Click below to download your MP4.</p>
+        <h2>Your Video Is Ready!</h2>
+        <p>Click below to download your Sora-generated MP4.</p>
         <a id="download-link" href="#" class="btn-primary" download>
           ⬇️ Download MP4
         </a>
-        <button id="start-over-btn" class="btn-secondary">Make Another Video</button>
+        <button id="start-over-btn" class="btn-secondary">Generate Another</button>
       </div>
 
       <!-- Error panel (hidden until error) -->
@@ -121,7 +121,7 @@
     </main>
 
     <footer class="footer">
-      <p>Only upload music you own or have permission to use. By generating a video you confirm the content is original or appropriately licensed.</p>
+      <p>Powered by OpenAI Sora. Only generate content you have the right to create. Videos are stored locally for personal use.</p>
     </footer>
 
   </div>

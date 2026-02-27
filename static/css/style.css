@@ -297,6 +297,47 @@ textarea:focus {
 }
 
 /* ─────────────────────────────────────────────
+   Settings grid (model / resolution / duration)
+───────────────────────────────────────────── */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1.25rem;
+  margin-top: 0.5rem;
+}
+
+.setting-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.setting-group label {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.setting-group select,
+.setting-group input[type="number"] {
+  background: var(--surface2);
+  border: 1.5px solid #2d2d50;
+  border-radius: 8px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.95rem;
+  padding: 0.6rem 0.85rem;
+  transition: border-color var(--transition);
+  width: 100%;
+}
+
+.setting-group select:focus,
+.setting-group input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ─────────────────────────────────────────────
    Responsive
 ───────────────────────────────────────────── */
 @media (max-width: 520px) {
