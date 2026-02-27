@@ -1,176 +1,157 @@
 """
-Video Generator: Combines uploaded images and an MP3 audio track
-into an MP4 music video with Ken Burns (zoom/pan) effects and
-AI-generated text overlays.
+Video Generator: Combines images (optional) and an MP3 audio track into an
+MP4 music video using FFmpeg.
+
+The previous MoviePy Ken Burns / ImageMagick caption-overlay path has been
+removed.  FFmpeg handles all encoding so the app works without ImageMagick.
+When no images are supplied a plain dark-gradient background is used so that
+"vision prompt only" jobs still produce a valid MP4.
 """
 
 import os
-import math
-
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import (
-    AudioFileClip,
-    ImageClip,
-    TextClip,
-    CompositeVideoClip,
-    concatenate_videoclips,
-)
+import subprocess
+import tempfile
+from pathlib import Path
 
 # Output resolution
 OUTPUT_WIDTH = 1280
 OUTPUT_HEIGHT = 720
 OUTPUT_FPS = 24
-OUTPUT_BITRATE = "4000k"
-
-# Ken Burns zoom range (1.0 = original, 1.15 = 15% zoom)
-ZOOM_START = 1.0
-ZOOM_END = 1.15
-
-# Text overlay settings
-FONT_SIZE = 40
-CAPTION_DISPLAY_DURATION_FRACTION = 0.6  # Show caption for first 60% of scene
-CAPTION_DISPLAY_FRACTION = CAPTION_DISPLAY_DURATION_FRACTION
-
-
-def _resize_and_crop(pil_img: Image.Image, width: int, height: int) -> np.ndarray:
-    """Resize image to fill target dimensions (cover), then center-crop."""
-    img_ratio = pil_img.width / pil_img.height
-    target_ratio = width / height
-
-    if img_ratio > target_ratio:
-        # Image is wider than target: fit by height
-        new_h = height
-        new_w = int(pil_img.width * height / pil_img.height)
-    else:
-        # Image is taller than target: fit by width
-        new_w = width
-        new_h = int(pil_img.height * width / pil_img.width)
-
-    pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
-
-    # Center crop
-    left = (new_w - width) // 2
-    top = (new_h - height) // 2
-    pil_img = pil_img.crop((left, top, left + width, top + height))
-
-    return np.array(pil_img.convert("RGB"))
-
-
-def _ken_burns_frame(base_frame: np.ndarray, t: float, duration: float) -> np.ndarray:
-    """Apply a Ken Burns zoom-in effect: zoom from ZOOM_START to ZOOM_END."""
-    h, w = base_frame.shape[:2]
-    progress = t / duration if duration > 0 else 0
-    zoom = ZOOM_START + (ZOOM_END - ZOOM_START) * progress
-
-    # Compute cropped region
-    crop_w = int(w / zoom)
-    crop_h = int(h / zoom)
-    x_start = (w - crop_w) // 2
-    y_start = (h - crop_h) // 2
-
-    cropped = base_frame[y_start : y_start + crop_h, x_start : x_start + crop_w]
-    resized = np.array(
-        Image.fromarray(cropped).resize((w, h), Image.BILINEAR)
-    )
-    return resized
-
-
-def _make_scene_clip(
-    image_path: str,
-    duration: float,
-    caption: str,
-) -> CompositeVideoClip:
-    """Create a single scene clip with Ken Burns effect and optional caption."""
-    pil_img = Image.open(image_path).convert("RGB")
-    base_frame = _resize_and_crop(pil_img, OUTPUT_WIDTH, OUTPUT_HEIGHT)
-
-    video_clip = ImageClip(base_frame, duration=duration).fl(
-        lambda gf, t: _ken_burns_frame(base_frame, t, duration),
-    )
-    video_clip = video_clip.set_fps(OUTPUT_FPS)
-
-    layers = [video_clip]
-
-    # Add caption overlay if provided
-    if caption and caption.strip():
-        caption_duration = duration * CAPTION_DISPLAY_FRACTION
-        try:
-            txt_clip = (
-                TextClip(
-                    caption,
-                    fontsize=FONT_SIZE,
-                    color="white",
-                    stroke_color="black",
-                    stroke_width=2,
-                    method="caption",
-                    size=(OUTPUT_WIDTH - 80, None),
-                    align="center",
-                )
-                .set_position(("center", OUTPUT_HEIGHT - 120))
-                .set_start(0)
-                .set_duration(caption_duration)
-                .crossfadeout(0.5)
-            )
-            layers.append(txt_clip)
-        except Exception:
-            # TextClip may fail if ImageMagick is unavailable – skip caption gracefully
-            pass
-
-    composite = CompositeVideoClip(layers, size=(OUTPUT_WIDTH, OUTPUT_HEIGHT))
-    composite = composite.set_duration(duration)
-    return composite
 
 
 def generate_video(
     audio_path: str,
     image_paths: list[str],
-    captions: list[str],
+    captions: list[str],  # kept for API compatibility, no longer rendered
     output_path: str,
 ) -> str:
     """
-    Generate an MP4 music video.
+    Generate an MP4 music video from images (optional) and audio via FFmpeg.
 
     Args:
         audio_path:  Path to the input MP3 file.
-        image_paths: List of image file paths (1–6 images).
-        captions:    AI-generated captions, one per image.
+        image_paths: List of image file paths (may be empty for vision-only jobs).
+        captions:    Ignored — caption overlays have been removed.
         output_path: Destination path for the output MP4.
 
     Returns:
         The output_path on success.
     """
-    if not image_paths:
-        raise ValueError("At least one image is required.")
+    if image_paths:
+        return _generate_from_images(audio_path, image_paths, output_path)
+    return _generate_from_gradient(audio_path, output_path)
 
-    audio_clip = AudioFileClip(audio_path)
-    total_duration = audio_clip.duration
 
-    # Distribute duration equally across all scenes
-    scene_duration = total_duration / len(image_paths)
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-    scene_clips = []
-    for i, img_path in enumerate(image_paths):
-        caption = captions[i] if i < len(captions) else ""
-        clip = _make_scene_clip(img_path, scene_duration, caption)
-        scene_clips.append(clip)
+def _generate_from_images(
+    audio_path: str,
+    image_paths: list[str],
+    output_path: str,
+) -> str:
+    """Build a slideshow from still images and overlay audio with FFmpeg."""
+    audio_duration = _probe_duration(audio_path)
+    per_image = audio_duration / len(image_paths)
 
-    # Concatenate all scenes
-    final_video = concatenate_videoclips(scene_clips, method="compose")
-    final_video = final_video.set_audio(audio_clip)
+    concat_file = None
+    silent_path = output_path + ".silent.mp4"
 
-    final_video.write_videofile(
-        output_path,
-        fps=OUTPUT_FPS,
-        codec="libx264",
-        audio_codec="aac",
-        bitrate=OUTPUT_BITRATE,
-        temp_audiofile=output_path + ".temp_audio.m4a",
-        remove_temp=True,
-        logger=None,
-    )
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            slide_paths: list[str] = []
+            for i, img_path in enumerate(image_paths):
+                slide = os.path.join(tmp, f"slide_{i:04d}.mp4")
+                _run([
+                    "ffmpeg", "-y",
+                    "-loop", "1", "-i", img_path,
+                    "-t", str(per_image),
+                    "-vf", (
+                        f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}"
+                        ":force_original_aspect_ratio=decrease,"
+                        f"pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:"
+                        "(ow-iw)/2:(oh-ih)/2,setsar=1"
+                    ),
+                    "-c:v", "libx264", "-preset", "fast",
+                    "-crf", "20", "-pix_fmt", "yuv420p",
+                    "-r", str(OUTPUT_FPS), "-an",
+                    slide,
+                ])
+                slide_paths.append(slide)
 
-    audio_clip.close()
-    final_video.close()
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False
+            ) as fh:
+                concat_file = fh.name
+                for sp in slide_paths:
+                    fh.write(f"file '{sp}'\n")
+
+            _run([
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_file,
+                "-c", "copy", "-an",
+                silent_path,
+            ])
+
+        _run([
+            "ffmpeg", "-y",
+            "-i", silent_path,
+            "-i", audio_path,
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", output_path,
+        ])
+
+    finally:
+        if concat_file is not None:
+            Path(concat_file).unlink(missing_ok=True)
+        Path(silent_path).unlink(missing_ok=True)
 
     return output_path
+
+
+def _generate_from_gradient(audio_path: str, output_path: str) -> str:
+    """Create a plain dark-background clip and overlay audio (vision-only jobs)."""
+    audio_duration = _probe_duration(audio_path)
+    _run([
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        "-i", (
+            f"color=c=0x1a1a2e:size={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}"
+            f":rate={OUTPUT_FPS}:duration={audio_duration}"
+        ),
+        "-i", audio_path,
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "libx264", "-preset", "fast",
+        "-crf", "20", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest", output_path,
+    ])
+    return output_path
+
+
+def _probe_duration(path: str) -> float:
+    """Return duration in seconds via ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "quiet",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path,
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed for '{path}': {result.stderr}")
+    if not result.stdout.strip():
+        raise RuntimeError(f"ffprobe returned no duration for '{path}'")
+    return float(result.stdout.strip())
+
+
+def _run(cmd: list[str]) -> None:
+    """Run a subprocess command, raising RuntimeError on non-zero exit."""
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg error: {result.stderr[-600:]}")
