@@ -41,6 +41,7 @@ def generate_scene_clips(
     resolution: str = DEFAULT_RESOLUTION,
     progress_callback=None,
     char_descriptions: dict[str, str] | None = None,
+    ref_image_paths: dict[str, list[str]] | None = None,
 ) -> list[str]:
     """
     Generate one Sora clip per scene dict with identity QC and retry.
@@ -49,6 +50,11 @@ def generate_scene_clips(
       - prompt:     str  – Sora text prompt
       - duration:   int  – clip length in seconds
       - characters: list – character names (used for QC)
+
+    *ref_image_paths* maps character name → list of image file paths.  These
+    are passed to the stub generator (used when no API key is configured) so
+    the uploaded character photos appear in the placeholder clips and thumbnails
+    instead of a plain dark-gradient.
 
     Returns ordered list of saved MP4 paths (may be shorter than *scenes*
     if some clips could not be generated after retries).
@@ -61,6 +67,10 @@ def generate_scene_clips(
         from clip_provider import generate_clip as _stub_generate_clip
         clips_dir_path = Path(clips_dir)
         clips_dir_path.mkdir(parents=True, exist_ok=True)
+        # Flatten all reference images across characters for the slide-show stub
+        all_ref_images: list[str] = []
+        for paths in (ref_image_paths or {}).values():
+            all_ref_images.extend(str(p) for p in paths)
         total = len(scenes)
         saved_clips: list[str] = []
         for idx, scene in enumerate(scenes):
@@ -73,6 +83,7 @@ def generate_scene_clips(
                 duration=int(scene.get("duration", DEFAULT_DURATION)),
                 resolution=resolution,
                 output_path=clip_path,
+                ref_images=all_ref_images if all_ref_images else None,
             )
             saved_clips.append(clip_path)
         return saved_clips
