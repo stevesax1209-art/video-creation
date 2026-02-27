@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>🎬 Sora Cinematic Video Generator</title>
+  <title>🎬 AI Music Video Generator</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 </head>
 <body>
@@ -12,43 +12,119 @@
     <!-- Header -->
     <header class="hero">
       <div class="hero-inner">
-        <h1>🎬 Sora Cinematic Video Generator</h1>
+        <h1>🎬 AI Music Video Generator</h1>
         <p class="hero-sub">
-          Describe your vision, choose your settings, and let OpenAI Sora
-          generate a&nbsp;cinematic&nbsp;MP4 video for you.
+          Upload your song, choose your cast, and let Sora generate a full
+          cinematic&nbsp;music&nbsp;video — one button, no approvals.
         </p>
       </div>
     </header>
 
-    <!-- Main form -->
     <main class="container" id="main-content">
-      <form id="upload-form" novalidate>
+      <form id="upload-form" enctype="multipart/form-data" novalidate>
 
-        <!-- Step 1: Prompt -->
-        <section class="card" id="step-prompt">
+        <!-- ── Step 1: Upload MP3 ─────────────────────────────────────── -->
+        <section class="card" id="step-audio">
           <div class="step-badge">1</div>
-          <h2>Describe Your Video</h2>
-          <p class="hint">Write a cinematic scene description — max {{ max_words }} words</p>
-          <textarea
-            id="prompt"
-            name="prompt"
-            rows="8"
-            maxlength="20000"
-            placeholder="Example: A sweeping aerial shot over misty mountain peaks at golden hour, epic orchestral mood, slow cinematic pan revealing a lone hiker on a rocky ridge…"
-            required
-          ></textarea>
-          <div class="word-counter">
-            <span id="word-count">0</span> / {{ max_words }} words
+          <h2>Upload Your Song</h2>
+          <p class="hint">MP3 format · 3–4 minutes · Max 60 MB</p>
+          <label class="drop-zone" id="audio-drop" for="audio-input">
+            <span class="drop-icon">🎵</span>
+            <span class="drop-text" id="audio-label">Click or drag &amp; drop your MP3 here</span>
+            <input type="file" id="audio-input" name="audio"
+                   accept=".mp3,audio/mpeg" required hidden />
+          </label>
+        </section>
+
+        <!-- ── Step 2: Cast Selection ──────────────────────────────────── -->
+        <section class="card" id="step-cast">
+          <div class="step-badge">2</div>
+          <h2>Select Cast</h2>
+          <p class="hint">Bryce appears in at least 70 % of scenes. Max 2 locked characters.</p>
+          <div class="radio-cards" id="cast-cards">
+            {% for key, label in cast_options.items() %}
+            <label class="radio-card{% if loop.first %} selected{% endif %}">
+              <input type="radio" name="cast" value="{{ key }}"
+                     {% if loop.first %}checked{% endif %} />
+              <span class="radio-card-icon">🎭</span>
+              <span>{{ label }}</span>
+            </label>
+            {% endfor %}
           </div>
         </section>
 
-        <!-- Step 2: Settings -->
-        <section class="card" id="step-settings">
-          <div class="step-badge">2</div>
-          <h2>Video Settings</h2>
+        <!-- ── Step 3: Reference Images ───────────────────────────────── -->
+        <section class="card" id="step-refs">
+          <div class="step-badge">3</div>
+          <h2>Character Reference Images</h2>
+          <p class="hint">Upload at least {{ min_ref_images }} clear photos per character to maintain identity consistency.</p>
 
-          <div class="settings-grid">
+          <!-- Bryce (always shown) -->
+          <div class="ref-character" id="ref-bryce">
+            <h3>Bryce <span class="ref-count" id="bryce-count">0 / 3+ photos</span></h3>
+            <label class="drop-zone" id="bryce-drop" for="bryce-input">
+              <span class="drop-icon">📸</span>
+              <span class="drop-text" id="bryce-label">Click or drag photos here</span>
+              <input type="file" id="bryce-input" name="ref_bryce"
+                     accept=".jpg,.jpeg,.png,.webp,image/*" multiple hidden />
+            </label>
+            <div class="preview-grid" id="bryce-preview"></div>
+          </div>
 
+          <!-- Brian (shown when cast includes Brian) -->
+          <div class="ref-character hidden" id="ref-brian">
+            <h3>Brian <span class="ref-count" id="brian-count">0 / 3+ photos</span></h3>
+            <label class="drop-zone" id="brian-drop" for="brian-input">
+              <span class="drop-icon">📸</span>
+              <span class="drop-text" id="brian-label">Click or drag photos here</span>
+              <input type="file" id="brian-input" name="ref_brian"
+                     accept=".jpg,.jpeg,.png,.webp,image/*" multiple hidden />
+            </label>
+            <div class="preview-grid" id="brian-preview"></div>
+          </div>
+
+          <!-- Carmen (shown when cast includes Carmen) -->
+          <div class="ref-character hidden" id="ref-carmen">
+            <h3>Carmen <span class="ref-count" id="carmen-count">0 / 3+ photos</span></h3>
+            <label class="drop-zone" id="carmen-drop" for="carmen-input">
+              <span class="drop-icon">📸</span>
+              <span class="drop-text" id="carmen-label">Click or drag photos here</span>
+              <input type="file" id="carmen-input" name="ref_carmen"
+                     accept=".jpg,.jpeg,.png,.webp,image/*" multiple hidden />
+            </label>
+            <div class="preview-grid" id="carmen-preview"></div>
+          </div>
+        </section>
+
+        <!-- ── Step 4: Optional Lyrics ─────────────────────────────────── -->
+        <section class="card" id="step-lyrics">
+          <div class="step-badge">4</div>
+          <h2>Song Lyrics <span class="optional-tag">optional</span></h2>
+          <p class="hint">Paste lyrics to help guide emotional pacing of scenes.</p>
+          <textarea id="lyrics" name="lyrics" rows="6" maxlength="15000"
+            placeholder="Paste song lyrics here…"></textarea>
+        </section>
+
+        <!-- ── Step 5: Style Preset ────────────────────────────────────── -->
+        <section class="card" id="step-style">
+          <div class="step-badge">5</div>
+          <h2>Visual Style</h2>
+          <div class="radio-cards" id="style-cards">
+            {% for key, label in style_options.items() %}
+            <label class="radio-card{% if loop.first %} selected{% endif %}">
+              <input type="radio" name="style" value="{{ key }}"
+                     {% if loop.first %}checked{% endif %} />
+              <span class="radio-card-icon">🎨</span>
+              <span>{{ label }}</span>
+            </label>
+            {% endfor %}
+          </div>
+        </section>
+
+        <!-- ── Model (advanced, collapsed) ─────────────────────────────── -->
+        <details class="card settings-advanced" id="step-model">
+          <summary>⚙️ Advanced: Sora Model</summary>
+          <div class="settings-grid" style="margin-top:1rem">
             <div class="setting-group">
               <label for="model-select">Model</label>
               <select id="model-select" name="model">
@@ -57,61 +133,42 @@
                 {% endfor %}
               </select>
             </div>
-
-            <div class="setting-group">
-              <label for="resolution-select">Resolution</label>
-              <select id="resolution-select" name="resolution">
-                <option value="1280x720" selected>1280×720 — Landscape (default)</option>
-                <option value="720x1280">720×1280 — Vertical</option>
-              </select>
-            </div>
-
-            <div class="setting-group">
-              <label for="duration-input">Duration (seconds)</label>
-              <input
-                type="number"
-                id="duration-input"
-                name="duration"
-                min="{{ duration_min }}"
-                max="{{ duration_max }}"
-                value="{{ duration_default }}"
-              />
-              <span class="hint">{{ duration_min }}–{{ duration_max }} seconds</span>
-            </div>
-
           </div>
-        </section>
+        </details>
 
-        <!-- Submit -->
+        <!-- ── Submit ──────────────────────────────────────────────────── -->
         <div class="submit-row">
           <button type="submit" id="submit-btn" class="btn-primary">
-            🎬 Generate Cinematic Video
+            🎬 Generate Music Video
           </button>
         </div>
 
       </form>
 
-      <!-- Progress panel (hidden until generation starts) -->
+      <!-- Progress panel -->
       <div class="card progress-panel hidden" id="progress-panel">
-        <h2>⏳ Sora Is Generating Your Video…</h2>
+        <h2>⏳ Generating Your Music Video…</h2>
         <div class="progress-bar-track">
           <div class="progress-bar-fill" id="progress-bar"></div>
         </div>
         <p id="progress-message" class="progress-message">Starting…</p>
+        <p class="hint" style="margin-top:.75rem">
+          Sora generates each scene individually. A full video may take 30–90 minutes.
+        </p>
       </div>
 
-      <!-- Result panel (hidden until complete) -->
+      <!-- Result panel -->
       <div class="card result-panel hidden" id="result-panel">
         <span class="result-icon">🎉</span>
-        <h2>Your Video Is Ready!</h2>
-        <p>Click below to download your Sora-generated MP4.</p>
+        <h2>Your Music Video Is Ready!</h2>
+        <p>Click below to download your AI-generated MP4.</p>
         <a id="download-link" href="#" class="btn-primary" download>
           ⬇️ Download MP4
         </a>
-        <button id="start-over-btn" class="btn-secondary">Generate Another</button>
+        <button id="start-over-btn" class="btn-secondary">Make Another Video</button>
       </div>
 
-      <!-- Error panel (hidden until error) -->
+      <!-- Error panel -->
       <div class="card error-panel hidden" id="error-panel">
         <span class="result-icon">❌</span>
         <h2>Something Went Wrong</h2>
@@ -121,7 +178,7 @@
     </main>
 
     <footer class="footer">
-      <p>Powered by OpenAI Sora. Only generate content you have the right to create. Videos are stored locally for personal use.</p>
+      <p>For personal use only. Only generate content you have the right to create.</p>
     </footer>
 
   </div>
@@ -129,3 +186,4 @@
   <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>
 </html>
+

@@ -1,12 +1,17 @@
 """
-Sora Cinematic Video Generator – Flask Application
-===================================================
-Accepts a text prompt together with model, resolution, and duration
-preferences, submits a generation job to OpenAI Sora, polls for
-completion, stores the resulting MP4 locally, and serves a download link.
+AI Music Video Generator – Flask Application (Phase 1)
+=======================================================
+Accepts an MP3, optional lyrics, a cast selection with reference images
+per character, and a style preset. Orchestrates:
+  1. Audio duration analysis
+  2. GPT-4 Vision character description from reference images
+  3. AI scene planning (60–90 micro-scenes)
+  4. Sora clip generation with wider-shot fallback
+  5. ffmpeg stitch + audio overlay → final MP4
 """
 
 import os
+import shutil
 import uuid
 import threading
 from pathlib import Path
@@ -19,6 +24,7 @@ from flask import (
     send_file,
     abort,
 )
+from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,25 +34,41 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).parent
+UPLOAD_FOLDER = BASE_DIR / "uploads"
 GENERATED_FOLDER = BASE_DIR / "generated"
 
+ALLOWED_AUDIO = {"mp3"}
+ALLOWED_IMAGE = {"jpg", "jpeg", "png", "webp"}
+
+MAX_AUDIO_SIZE_MB = 60
+MAX_IMAGE_SIZE_MB = 10
+MAX_REF_IMAGES_PER_CHAR = 10
+MIN_REF_IMAGES_PER_CHAR = 3
+
+CAST_OPTIONS = {
+    "bryce":        "Bryce only",
+    "bryce_brian":  "Bryce + Brian",
+    "bryce_carmen": "Bryce + Carmen",
+}
+
+STYLE_OPTIONS = {
+    "documentary": "Documentary Handheld",
+    "cinematic":   "Photorealistic Cinematic",
+}
+
 SORA_MODELS = ["sora-2", "sora-2-pro"]
-SORA_RESOLUTIONS = ["1280x720", "720x1280"]
 DEFAULT_MODEL = "sora-2"
-DEFAULT_RESOLUTION = "1280x720"
-SORA_DURATION_MIN = 1
-SORA_DURATION_MAX = 20
-SORA_DURATION_DEFAULT = 10
+DEFAULT_RESOLUTION = "1280x720"  # 720p landscape; Sora also supports "1920x1080"
 
-MAX_PROMPT_WORDS = 2500
-
+UPLOAD_FOLDER.mkdir(exist_ok=True)
 GENERATED_FOLDER.mkdir(exist_ok=True)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB – text only
+# 60 MB audio + up to 6 character images × 10 MB each
+app.config["MAX_CONTENT_LENGTH"] = (MAX_AUDIO_SIZE_MB + 6 * MAX_IMAGE_SIZE_MB) * 1024 * 1024
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", os.urandom(24).hex())
 
-# In-memory job store  {job_id: {"status": ..., "progress": ..., "message": ..., "output": ...}}
+# In-memory job store  {job_id: {"status", "progress", "message", "output"}}
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 
@@ -55,8 +77,8 @@ _jobs_lock = threading.Lock()
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _word_count(text: str) -> int:
-    return len(text.split())
+def _allowed_file(filename: str, allowed: set) -> bool:
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in allowed
 
 
 def _job_update(job_id: str, **kwargs):
@@ -64,45 +86,97 @@ def _job_update(job_id: str, **kwargs):
         _jobs[job_id].update(kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Background Sora worker
-# ---------------------------------------------------------------------------
-
-def _sora_worker(
-    job_id: str,
-    prompt: str,
-    model: str,
-    resolution: str,
-    duration: int,
-    output_path: Path,
-):
-    """Run in a background thread; submits to Sora and polls until complete."""
+def _cleanup_job_dir(job_dir: Path):
     try:
-        _job_update(job_id, status="processing", progress=10, message="Connecting to Sora…")
+        shutil.rmtree(job_dir, ignore_errors=True)
+    except Exception:
+        pass
 
-        from sora_generator import create_sora_video
 
-        def _progress(pct: int, msg: str):
+# ---------------------------------------------------------------------------
+# Background worker
+# ---------------------------------------------------------------------------
+
+def _music_video_worker(
+    job_id: str,
+    job_dir: Path,
+    mp3_path: Path,
+    cast_key: str,
+    ref_image_paths: dict[str, list[Path]],
+    lyrics: str,
+    style_key: str,
+    model: str,
+):
+    output_path = GENERATED_FOLDER / f"{job_id}.mp4"
+    clips_dir = job_dir / "clips"
+
+    try:
+        # ── 1. Describe characters via GPT-4 Vision ──────────────────────
+        _job_update(job_id, status="processing", progress=5,
+                    message="Analyzing character reference images…")
+
+        from scene_planner import describe_character
+        char_descs: dict[str, str] = {}
+        for char_name, img_paths in ref_image_paths.items():
+            char_descs[char_name] = describe_character(
+                char_name, [str(p) for p in img_paths]
+            )
+
+        # ── 2. Plan scenes ────────────────────────────────────────────────
+        _job_update(job_id, progress=10, message="Planning cinematic scenes…")
+
+        from scene_planner import plan_scenes
+        scenes = plan_scenes(
+            mp3_path=str(mp3_path),
+            cast_key=cast_key,
+            lyrics=lyrics or None,
+            style_key=style_key,
+            character_descriptions=char_descs,
+        )
+
+        _job_update(job_id, progress=15,
+                    message=f"Scene plan ready – {len(scenes)} scenes to generate…")
+
+        # ── 3. Generate Sora clips ────────────────────────────────────────
+        from sora_generator import generate_scene_clips
+
+        def _clip_progress(pct: int, msg: str):
             _job_update(job_id, progress=pct, message=msg)
 
-        create_sora_video(
-            prompt=prompt,
-            output_path=str(output_path),
+        saved_clips = generate_scene_clips(
+            scenes=scenes,
+            clips_dir=str(clips_dir),
             model=model,
-            resolution=resolution,
-            duration=duration,
-            progress_callback=_progress,
+            resolution=DEFAULT_RESOLUTION,
+            progress_callback=_clip_progress,
+        )
+
+        if not saved_clips:
+            raise RuntimeError("No clips were generated. Check your OPENAI_API_KEY and Sora quota.")
+
+        # ── 4. Stitch clips + audio ───────────────────────────────────────
+        _job_update(job_id, progress=90, message="Stitching clips and adding audio…")
+
+        from video_stitcher import stitch_clips
+        stitch_clips(
+            clip_paths=saved_clips,
+            audio_path=str(mp3_path),
+            output_path=str(output_path),
         )
 
         _job_update(
             job_id,
             status="complete",
             progress=100,
-            message="Your cinematic video is ready!",
+            message=f"Your music video is ready! ({len(saved_clips)} scenes stitched)",
             output=output_path.name,
         )
+
     except Exception as exc:
         _job_update(job_id, status="error", progress=0, message=f"Error: {exc}")
+
+    finally:
+        _cleanup_job_dir(job_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -113,55 +187,93 @@ def _sora_worker(
 def index():
     return render_template(
         "index.html",
+        cast_options=CAST_OPTIONS,
+        style_options=STYLE_OPTIONS,
         sora_models=SORA_MODELS,
-        sora_resolutions=SORA_RESOLUTIONS,
         default_model=DEFAULT_MODEL,
-        duration_min=SORA_DURATION_MIN,
-        duration_max=SORA_DURATION_MAX,
-        duration_default=SORA_DURATION_DEFAULT,
-        max_words=MAX_PROMPT_WORDS,
+        min_ref_images=MIN_REF_IMAGES_PER_CHAR,
     )
 
 
 @app.route("/generate", methods=["POST"])
 def generate():
-    """Validate the prompt and settings, then kick off a Sora generation job."""
+    """Validate inputs and start the music video background worker."""
 
-    # --- Prompt ---
-    prompt = request.form.get("prompt", "").strip()
-    if not prompt:
-        return jsonify({"error": "Please provide a video prompt."}), 400
-    if _word_count(prompt) > MAX_PROMPT_WORDS:
-        return jsonify({"error": f"Prompt exceeds {MAX_PROMPT_WORDS} words."}), 400
+    # ── MP3 ──────────────────────────────────────────────────────────────
+    audio_file = request.files.get("audio")
+    if not audio_file or not audio_file.filename:
+        return jsonify({"error": "Please upload an MP3 file."}), 400
+    if not _allowed_file(audio_file.filename, ALLOWED_AUDIO):
+        return jsonify({"error": "Audio must be an MP3 file."}), 400
 
-    # --- Model ---
-    model = request.form.get("model", "sora-2").strip()
+    # ── Cast ─────────────────────────────────────────────────────────────
+    cast_key = request.form.get("cast", "").strip()
+    if cast_key not in CAST_OPTIONS:
+        return jsonify({"error": f"Invalid cast selection."}), 400
+
+    # ── Reference images ─────────────────────────────────────────────────
+    # Determine which characters need reference images
+    from scene_planner import CAST_MAP
+    characters = CAST_MAP[cast_key]
+
+    ref_image_files: dict[str, list] = {}
+    for char in characters:
+        field = f"ref_{char.lower()}"
+        files = [f for f in request.files.getlist(field) if f and f.filename]
+        invalid = [f for f in files if not _allowed_file(f.filename, ALLOWED_IMAGE)]
+        if invalid:
+            return jsonify({"error": f"Unsupported image format for {char}."}), 400
+        if len(files) < MIN_REF_IMAGES_PER_CHAR:
+            return jsonify({
+                "error": f"Please upload at least {MIN_REF_IMAGES_PER_CHAR} reference images for {char}."
+            }), 400
+        ref_image_files[char] = files[:MAX_REF_IMAGES_PER_CHAR]
+
+    # ── Style ─────────────────────────────────────────────────────────────
+    style_key = request.form.get("style", "cinematic").strip()
+    if style_key not in STYLE_OPTIONS:
+        return jsonify({"error": "Invalid style selection."}), 400
+
+    # ── Model ─────────────────────────────────────────────────────────────
+    model = request.form.get("model", DEFAULT_MODEL).strip()
     if model not in SORA_MODELS:
-        return jsonify({"error": f"Invalid model. Choose from: {', '.join(SORA_MODELS)}."}), 400
+        return jsonify({"error": f"Invalid model."}), 400
 
-    # --- Resolution ---
-    resolution = request.form.get("resolution", "1280x720").strip()
-    if resolution not in SORA_RESOLUTIONS:
-        return jsonify({"error": f"Invalid resolution. Choose from: {', '.join(SORA_RESOLUTIONS)}."}), 400
+    # ── Lyrics (optional) ─────────────────────────────────────────────────
+    lyrics = request.form.get("lyrics", "").strip()
 
-    # --- Duration ---
-    try:
-        duration = int(request.form.get("duration", SORA_DURATION_DEFAULT))
-    except (TypeError, ValueError):
-        return jsonify({"error": "Duration must be an integer."}), 400
-    if not (SORA_DURATION_MIN <= duration <= SORA_DURATION_MAX):
-        return jsonify({"error": f"Duration must be between {SORA_DURATION_MIN} and {SORA_DURATION_MAX} seconds."}), 400
-
-    # --- Register job and start background thread ---
+    # ── Save uploads ──────────────────────────────────────────────────────
     job_id = uuid.uuid4().hex
-    output_path = GENERATED_FOLDER / f"{job_id}.mp4"
+    job_dir = UPLOAD_FOLDER / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
 
+    mp3_path = job_dir / secure_filename(audio_file.filename)
+    audio_file.save(str(mp3_path))
+
+    saved_ref_paths: dict[str, list[Path]] = {}
+    for char, files in ref_image_files.items():
+        char_dir = job_dir / f"ref_{char.lower()}"
+        char_dir.mkdir(exist_ok=True)
+        saved: list[Path] = []
+        for i, img_file in enumerate(files):
+            ext = img_file.filename.rsplit(".", 1)[-1].lower()
+            img_path = char_dir / f"{i:02d}.{ext}"
+            img_file.save(str(img_path))
+            saved.append(img_path)
+        saved_ref_paths[char] = saved
+
+    # ── Register job and start worker ─────────────────────────────────────
     with _jobs_lock:
-        _jobs[job_id] = {"status": "queued", "progress": 0, "message": "Queued…", "output": None}
+        _jobs[job_id] = {
+            "status": "queued",
+            "progress": 0,
+            "message": "Queued…",
+            "output": None,
+        }
 
     thread = threading.Thread(
-        target=_sora_worker,
-        args=(job_id, prompt, model, resolution, duration, output_path),
+        target=_music_video_worker,
+        args=(job_id, job_dir, mp3_path, cast_key, saved_ref_paths, lyrics, style_key, model),
         daemon=True,
     )
     thread.start()
@@ -191,7 +303,7 @@ def download(job_id: str):
     return send_file(
         str(output_path),
         as_attachment=True,
-        download_name="sora_video.mp4",
+        download_name="music_video.mp4",
         mimetype="video/mp4",
     )
 
@@ -203,3 +315,4 @@ def download(job_id: str):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
