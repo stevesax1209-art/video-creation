@@ -129,18 +129,22 @@ def _persist_review_data(
     char_descs: dict,
     mp3_path: Path,
     model: str,
+    ref_image_paths: dict[str, list[str]] | None = None,
 ) -> Path:
     """
-    Copy clips, audio, and thumbnails to a persistent review directory so they
-    survive the upload-folder cleanup and can be accessed via the /review route.
+    Copy clips, audio, thumbnails, and reference images to a persistent review
+    directory so they survive the upload-folder cleanup and can be accessed via
+    the /review route.
 
     Returns the review directory path.
     """
     review_dir = GENERATED_FOLDER / job_id
     clips_dest  = review_dir / "clips"
     thumbs_dest = review_dir / "thumbs"
+    refs_dest   = review_dir / "refs"
     clips_dest.mkdir(parents=True, exist_ok=True)
     thumbs_dest.mkdir(parents=True, exist_ok=True)
+    refs_dest.mkdir(parents=True, exist_ok=True)
 
     # Copy the original MP3 so re-stitch can use it later
     mp3_dest = review_dir / mp3_path.name
@@ -148,6 +152,24 @@ def _persist_review_data(
         shutil.copy2(str(mp3_path), str(mp3_dest))
     except Exception:
         pass  # Re-stitch will gracefully skip audio if missing
+
+    # Copy reference images so targeted regen can use them as a slide-show stub.
+    # Directory names are lowercased for filesystem compatibility; the manifest
+    # stores absolute paths so casing is not used for lookup.
+    saved_ref_paths: dict[str, list[str]] = {}
+    for char, paths in (ref_image_paths or {}).items():
+        char_dir = refs_dest / char.lower()
+        char_dir.mkdir(exist_ok=True)
+        char_saved: list[str] = []
+        for p in paths:
+            try:
+                dest_img = char_dir / Path(p).name
+                shutil.copy2(p, str(dest_img))
+                char_saved.append(str(dest_img))
+            except Exception:
+                pass
+        if char_saved:
+            saved_ref_paths[char] = char_saved
 
     clip_names: list[str] = []
     thumb_names: list[str] = []
@@ -177,6 +199,7 @@ def _persist_review_data(
         "thumbs":       thumb_names,
         "scenes":       scenes,
         "prompt_items": prompt_items,
+        "ref_image_paths": saved_ref_paths,
     }
     with open(review_dir / "manifest.json", "w") as fh:
         json.dump(manifest, fh, indent=2)
@@ -295,6 +318,10 @@ def _music_video_worker(
             model=model,
             progress_callback=_clip_progress,
             char_descriptions=char_descs,
+            ref_image_paths={
+                char: [str(p) for p in paths]
+                for char, paths in ref_image_paths.items()
+            },
         )
 
         if not saved_clips:
@@ -314,6 +341,10 @@ def _music_video_worker(
             char_descs=char_descs,
             mp3_path=mp3_path,
             model=model,
+            ref_image_paths={
+                char: [str(p) for p in paths]
+                for char, paths in ref_image_paths.items()
+            },
         )
 
         # ── Step 5: Stitch + audio ────────────────────────────────────────
@@ -588,11 +619,16 @@ def _regen_worker(job_id: str, clip_indices: list[int], manifest: dict):
                     qc_desc=qc_desc,
                 )
             else:
+                # Collect any persisted reference images for the slide-show stub
+                regen_ref_images: list[str] = []
+                for paths in manifest.get("ref_image_paths", {}).values():
+                    regen_ref_images.extend(paths)
                 from clip_provider import generate_clip as _stub
                 _stub(
                     prompt=scene["prompt"],
                     duration=int(scene.get("duration", 5)),
                     output_path=clip_path,
+                    ref_images=regen_ref_images if regen_ref_images else None,
                 )
                 ok = True
 
