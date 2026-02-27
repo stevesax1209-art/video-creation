@@ -88,7 +88,13 @@ def stitch_clips(
 
 def _run_ffmpeg(cmd: list[str]) -> None:
     """Run an ffmpeg command and raise RuntimeError on failure."""
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffmpeg is required to stitch video clips but was not found. "
+            "Please install ffmpeg and ensure it is in your system PATH."
+        )
     if result.returncode != 0:
         # Decode safely to avoid cut mid-sequence issues in stderr
         stderr = result.stderr.encode("utf-8", errors="replace").decode("utf-8")[-600:]

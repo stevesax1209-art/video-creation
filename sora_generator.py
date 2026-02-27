@@ -15,7 +15,6 @@ import os
 import time
 from pathlib import Path
 
-import requests
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
@@ -27,7 +26,10 @@ DEFAULT_DURATION = 5
 
 SORA_POLL_INTERVAL = 10    # seconds between polls
 SORA_POLL_TIMEOUT  = 600   # max wait per clip (10 min)
-DOWNLOAD_TIMEOUT   = 120   # seconds for HTTP download
+DOWNLOAD_TIMEOUT   = 120   # seconds for SDK download
+
+# Valid clip durations accepted by the Sora API (in seconds).
+_VALID_SORA_SECONDS = [4, 8, 12]
 
 
 # ---------------------------------------------------------------------------
@@ -73,19 +75,26 @@ def generate_scene_clips(
             all_ref_images.extend(str(p) for p in paths)
         total = len(scenes)
         saved_clips: list[str] = []
+        first_error: Exception | None = None
         for idx, scene in enumerate(scenes):
             pct = 20 + int((idx / total) * 68)
             _cb(progress_callback, pct,
                 f"Generating stub clip {idx + 1}/{total}…")
             clip_path = str(clips_dir_path / f"clip_{idx:04d}.mp4")
-            _stub_generate_clip(
-                prompt=scene["prompt"],
-                duration=int(scene.get("duration", DEFAULT_DURATION)),
-                resolution=resolution,
-                output_path=clip_path,
-                ref_images=all_ref_images if all_ref_images else None,
-            )
-            saved_clips.append(clip_path)
+            try:
+                _stub_generate_clip(
+                    prompt=scene["prompt"],
+                    duration=int(scene.get("duration", DEFAULT_DURATION)),
+                    resolution=resolution,
+                    output_path=clip_path,
+                    ref_images=all_ref_images if all_ref_images else None,
+                )
+                saved_clips.append(clip_path)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if not saved_clips and first_error is not None:
+            raise first_error
         return saved_clips
 
     client = OpenAI(api_key=api_key)
@@ -138,8 +147,8 @@ def _generate_with_qc(
         current_prompt = _make_wider_shot_prompt(prompt) if attempt == 2 else prompt
         try:
             gen_id = _submit_job(client, current_prompt, model, resolution, duration)
-            url    = _poll_until_done(client, gen_id)
-            _download_video(url, clip_path)
+            video_id = _poll_until_done(client, gen_id)
+            _download_video(client, video_id, clip_path)
         except Exception:
             continue
 
@@ -180,7 +189,7 @@ def create_sora_video(
     gen_id = _submit_job(client, prompt, model, resolution, duration)
     _cb(progress_callback, 30, "Job queued. Sora is generating your video…")
 
-    url = _poll_until_done(
+    video_id = _poll_until_done(
         client, gen_id,
         on_progress=lambda elapsed: _cb(
             progress_callback,
@@ -190,7 +199,7 @@ def create_sora_video(
     )
 
     _cb(progress_callback, 85, "Downloading your video…")
-    _download_video(url, output_path)
+    _download_video(client, video_id, output_path)
     _cb(progress_callback, 100, "Video ready!")
     return output_path
 
@@ -200,27 +209,28 @@ def create_sora_video(
 # ---------------------------------------------------------------------------
 
 def _submit_job(client: OpenAI, prompt: str, model: str, resolution: str, duration: int) -> str:
-    generation = client.video.generations.create(
+    # Map requested duration to the nearest valid Sora seconds value (4, 8, or 12).
+    seconds = min(_VALID_SORA_SECONDS, key=lambda s: abs(s - duration))
+    generation = client.videos.create(
         model=model,
         prompt=prompt,
         size=resolution,
-        duration=duration,
-        n=1,
+        seconds=seconds,
     )
     return generation.id
 
 
-def _poll_until_done(client: OpenAI, generation_id: str, on_progress=None) -> str:
+def _poll_until_done(client: OpenAI, video_id: str, on_progress=None) -> str:
     elapsed = 0
     while elapsed < SORA_POLL_TIMEOUT:
         time.sleep(SORA_POLL_INTERVAL)
         elapsed += SORA_POLL_INTERVAL
 
-        result = client.video.generations.retrieve(generation_id)
+        result = client.videos.retrieve(video_id)
         status = result.status
 
-        if status == "succeeded":
-            return result.data[0].url
+        if status == "completed":
+            return video_id
 
         if status == "failed":
             error_detail = getattr(result, "error", "unknown error")
@@ -261,10 +271,10 @@ def _cb(callback, pct: int, message: str) -> None:
             pass
 
 
-def _download_video(url: str, output_path: str) -> None:
-    resp = requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT)
-    resp.raise_for_status()
+def _download_video(client: OpenAI, video_id: str, output_path: str) -> None:
+    """Download a completed Sora video by ID and write it to *output_path*."""
+    content = client.videos.download_content(video_id, timeout=DOWNLOAD_TIMEOUT)
     with open(output_path, "wb") as fh:
-        for chunk in resp.iter_content(chunk_size=65536):
+        for chunk in content.iter_bytes(chunk_size=65536):
             if chunk:
                 fh.write(chunk)
