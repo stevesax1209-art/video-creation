@@ -134,15 +134,21 @@ def _generate_from_gradient(audio_path: str, output_path: str) -> str:
 
 def _probe_duration(path: str) -> float:
     """Return duration in seconds via ffprobe."""
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "quiet",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            path,
-        ],
-        capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffprobe is required to read audio duration but was not found. "
+            "Please install ffmpeg (which includes ffprobe) and ensure it is in your system PATH."
+        )
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed for '{path}': {result.stderr}")
     if not result.stdout.strip():
@@ -152,6 +158,12 @@ def _probe_duration(path: str) -> float:
 
 def _run(cmd: list[str]) -> None:
     """Run a subprocess command, raising RuntimeError on non-zero exit."""
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffmpeg is required to generate video but was not found. "
+            "Please install ffmpeg and ensure it is in your system PATH."
+        )
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg error: {result.stderr[-600:]}")

@@ -102,7 +102,13 @@ def _generate_stub_clip(
         "-an",
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffmpeg is required to generate video clips but was not found. "
+            "Please install ffmpeg and ensure it is in your system PATH."
+        )
     if result.returncode != 0:
         raise RuntimeError(
             f"clip_provider: ffmpeg error generating stub clip: "
@@ -154,7 +160,13 @@ def _generate_slideshow_clip(
         output_path,
     ]
 
-    result = subprocess.run(args, capture_output=True, text=True)
+    try:
+        result = subprocess.run(args, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffmpeg is required to generate video clips but was not found. "
+            "Please install ffmpeg and ensure it is in your system PATH."
+        )
     if result.returncode != 0:
         raise RuntimeError(
             f"clip_provider: ffmpeg slideshow error: {result.stderr[-400:]}"
