@@ -1,7 +1,7 @@
 flask==3.0.3
 werkzeug==3.0.3
 moviepy==1.0.3
-Pillow==10.3.0
+Pillow==12.1.1
 openai==1.35.3
 numpy==1.26.4
 imageio==2.34.2
