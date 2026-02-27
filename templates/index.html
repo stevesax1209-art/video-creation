@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🎵 AI Music Video Generator</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+  <div class="page-wrapper">
+
+    <!-- Header -->
+    <header class="hero">
+      <div class="hero-inner">
+        <h1>🎬 AI Music Video Generator</h1>
+        <p class="hero-sub">
+          Upload your song, share up to 6 photos, and describe your vision —
+          we'll turn it into an&nbsp;MP4 music video.
+        </p>
+      </div>
+    </header>
+
+    <!-- Main form -->
+    <main class="container" id="main-content">
+      <form id="upload-form" enctype="multipart/form-data" novalidate>
+
+        <!-- Step 1: Audio -->
+        <section class="card" id="step-audio">
+          <div class="step-badge">1</div>
+          <h2>Upload Your Song</h2>
+          <p class="hint">MP3 format only · Max {{ (50) }}MB · Must be original or non-copyrighted music</p>
+          <label class="drop-zone" id="audio-drop" for="audio-input">
+            <span class="drop-icon">🎵</span>
+            <span class="drop-text" id="audio-label">Click or drag &amp; drop your MP3 here</span>
+            <input
+              type="file"
+              id="audio-input"
+              name="audio"
+              accept=".mp3,audio/mpeg"
+              required
+              hidden
+            />
+          </label>
+        </section>
+
+        <!-- Step 2: Images -->
+        <section class="card" id="step-images">
+          <div class="step-badge">2</div>
+          <h2>Upload Photos</h2>
+          <p class="hint">Up to {{ max_images }} images · JPG, PNG, GIF or WebP · Max 10MB each</p>
+          <label class="drop-zone" id="images-drop" for="images-input">
+            <span class="drop-icon">📸</span>
+            <span class="drop-text" id="images-label">Click or drag &amp; drop up to {{ max_images }} photos here</span>
+            <input
+              type="file"
+              id="images-input"
+              name="images"
+              accept=".jpg,.jpeg,.png,.gif,.webp,image/*"
+              multiple
+              required
+              hidden
+            />
+          </label>
+          <div class="preview-grid" id="preview-grid"></div>
+        </section>
+
+        <!-- Step 3: Description -->
+        <section class="card" id="step-description">
+          <div class="step-badge">3</div>
+          <h2>Describe Your Vision</h2>
+          <p class="hint">Tell us the mood, story, or aesthetic you want — max {{ max_words }} words</p>
+          <textarea
+            id="description"
+            name="description"
+            rows="8"
+            maxlength="20000"
+            placeholder="Example: A cinematic journey through a summer road trip with friends. Warm golden-hour lighting, carefree laughter, and a feeling of endless possibility…"
+            required
+          ></textarea>
+          <div class="word-counter">
+            <span id="word-count">0</span> / {{ max_words }} words
+          </div>
+        </section>
+
+        <!-- Submit -->
+        <div class="submit-row">
+          <button type="submit" id="submit-btn" class="btn-primary">
+            🎬 Generate My Music Video
+          </button>
+        </div>
+
+      </form>
+
+      <!-- Progress panel (hidden until generation starts) -->
+      <div class="card progress-panel hidden" id="progress-panel">
+        <h2>⏳ Generating Your Video…</h2>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progress-bar"></div>
+        </div>
+        <p id="progress-message" class="progress-message">Starting…</p>
+      </div>
+
+      <!-- Result panel (hidden until complete) -->
+      <div class="card result-panel hidden" id="result-panel">
+        <span class="result-icon">🎉</span>
+        <h2>Your Music Video Is Ready!</h2>
+        <p>Click below to download your MP4.</p>
+        <a id="download-link" href="#" class="btn-primary" download>
+          ⬇️ Download MP4
+        </a>
+        <button id="start-over-btn" class="btn-secondary">Make Another Video</button>
+      </div>
+
+      <!-- Error panel (hidden until error) -->
+      <div class="card error-panel hidden" id="error-panel">
+        <span class="result-icon">❌</span>
+        <h2>Something Went Wrong</h2>
+        <p id="error-message"></p>
+        <button id="retry-btn" class="btn-secondary">Try Again</button>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <p>Only upload music you own or have permission to use. By generating a video you confirm the content is original or appropriately licensed.</p>
+    </footer>
+
+  </div>
+
+  <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
