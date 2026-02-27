@@ -175,6 +175,7 @@ def build_prompts(
               "prompt":          str,
               "negative_prompt": str,
               "character_set":   list[str],
+              "arc":             str,  # "isolated_quiet" | "interactions_coaching" | "community_hopeful"
             }
 
     Raises:

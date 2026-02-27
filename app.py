@@ -556,6 +556,12 @@ def _regen_worker(job_id: str, clip_indices: list[int], manifest: dict):
         model      = manifest.get("model", "sora-2")
 
         total = len(clip_indices)
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        client = None
+        if api_key:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+
         for step, idx in enumerate(clip_indices):
             pct = int((step / total) * 70)
             _job_update(job_id, progress=pct,
@@ -568,10 +574,7 @@ def _regen_worker(job_id: str, clip_indices: list[int], manifest: dict):
             scene     = scenes[idx]
 
             from sora_generator import _generate_with_qc
-            from openai import OpenAI
-            api_key = os.environ.get("OPENAI_API_KEY", "")
-            if api_key:
-                client   = OpenAI(api_key=api_key)
+            if client:
                 qc_char  = scene.get("characters", [None])[0]
                 qc_desc  = char_descs.get(qc_char, "") if qc_char else ""
                 ok = _generate_with_qc(

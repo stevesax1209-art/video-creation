@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>🔍 Clip Review – {{ job_id[:8] }}…</title>
+  <title>🔍 Clip Review – {{ job_id[:8] | e }}…</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
   <style>
     .review-grid {

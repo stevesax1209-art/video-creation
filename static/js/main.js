@@ -220,7 +220,7 @@ function showResult(jobId, reviewUrl) {
   if (reviewLink) {
     if (reviewUrl) {
       reviewLink.href = reviewUrl;
-      reviewLink.style.display = "";
+      reviewLink.style.display = "inline-flex";
     } else {
       reviewLink.style.display = "none";
     }
