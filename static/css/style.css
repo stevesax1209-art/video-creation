@@ -297,9 +297,138 @@ textarea:focus {
 }
 
 /* ─────────────────────────────────────────────
+   Settings grid (advanced model select)
+───────────────────────────────────────────── */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1.25rem;
+  margin-top: 0.5rem;
+}
+
+.setting-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.setting-group label {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.setting-group select,
+.setting-group input[type="number"] {
+  background: var(--surface2);
+  border: 1.5px solid #2d2d50;
+  border-radius: 8px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.95rem;
+  padding: 0.6rem 0.85rem;
+  transition: border-color var(--transition);
+  width: 100%;
+}
+
+.setting-group select:focus,
+.setting-group input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ─────────────────────────────────────────────
+   Radio cards (cast + style selectors)
+───────────────────────────────────────────── */
+.radio-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.radio-card {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.75rem 1.25rem;
+  border: 2px solid #2d2d50;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+  flex: 1 1 140px;
+  min-width: 130px;
+}
+
+.radio-card input[type="radio"] { display: none; }
+
+.radio-card:hover        { border-color: var(--accent); background: rgba(233,69,96,0.05); }
+.radio-card.selected     { border-color: var(--accent); background: rgba(233,69,96,0.10); }
+
+.radio-card-icon { font-size: 1.3rem; }
+
+/* ─────────────────────────────────────────────
+   Reference character sections
+───────────────────────────────────────────── */
+.ref-character {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid #2d2d50;
+}
+
+.ref-character:first-child { border-top: none; margin-top: 0; padding-top: 0; }
+
+.ref-character h3 {
+  font-size: 1rem;
+  margin-bottom: 0.65rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.ref-count {
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* ─────────────────────────────────────────────
+   Optional tag
+───────────────────────────────────────────── */
+.optional-tag {
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--muted);
+  background: #2d2d50;
+  border-radius: 4px;
+  padding: 1px 6px;
+  vertical-align: middle;
+  margin-left: 0.4rem;
+}
+
+/* ─────────────────────────────────────────────
+   Advanced details/summary
+───────────────────────────────────────────── */
+.settings-advanced {
+  cursor: pointer;
+}
+
+.settings-advanced summary {
+  font-size: 0.9rem;
+  color: var(--muted);
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.settings-advanced summary:hover { color: var(--text); }
+
+/* ─────────────────────────────────────────────
    Responsive
 ───────────────────────────────────────────── */
 @media (max-width: 520px) {
   .card { padding: 1.25rem 1rem; }
   .btn-primary { width: 100%; justify-content: center; }
+  .radio-cards { flex-direction: column; }
+  .radio-card  { flex: none; }
 }

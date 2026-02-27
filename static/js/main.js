@@ -1,140 +1,117 @@
 /**
- * main.js – client-side logic for the Music Video Generator
+ * main.js – AI Music Video Generator (Phase 1 / Freebeat-style)
  *
  * Handles:
- *  - Drag-and-drop + click-to-select for audio and images
- *  - Image preview grid with remove buttons
- *  - Word-count live update with limit enforcement
- *  - Form submission via Fetch API
- *  - Progress polling and result/error display
+ *  - MP3 drag-and-drop / click-to-select
+ *  - Cast radio cards driving dynamic reference-image sections
+ *  - Per-character drag-and-drop image upload with thumbnail previews
+ *  - Style radio cards
+ *  - Form submit via Fetch API (multipart)
+ *  - Progress polling every 3 s with live message
+ *  - Result / error display
  */
 
 "use strict";
 
-// ---------------------------------------------------------------------------
-// Constants (must match server-side values)
-// ---------------------------------------------------------------------------
-const MAX_IMAGES = 6;
-const MAX_DESCRIPTION_WORDS = 2500;
-const POLL_INTERVAL_MS = 2000;
+const MIN_REF_IMAGES  = 3;
+const POLL_INTERVAL   = 3000;   // ms
 
-// ---------------------------------------------------------------------------
-// DOM refs
-// ---------------------------------------------------------------------------
-const form           = document.getElementById("upload-form");
-const audioInput     = document.getElementById("audio-input");
-const audioDrop      = document.getElementById("audio-drop");
-const audioLabel     = document.getElementById("audio-label");
-const imagesInput    = document.getElementById("images-input");
-const imagesDrop     = document.getElementById("images-drop");
-const imagesLabel    = document.getElementById("images-label");
-const previewGrid    = document.getElementById("preview-grid");
-const descTextarea   = document.getElementById("description");
-const wordCountEl    = document.getElementById("word-count");
-const wordCounter    = document.querySelector(".word-counter");
-const submitBtn      = document.getElementById("submit-btn");
+// ── DOM refs ──────────────────────────────────────────────────────────────
+const form       = document.getElementById("upload-form");
+const submitBtn  = document.getElementById("submit-btn");
+const audioInput = document.getElementById("audio-input");
+const audioDrop  = document.getElementById("audio-drop");
+const audioLabel = document.getElementById("audio-label");
 
-const mainContent    = document.getElementById("main-content");
-const progressPanel  = document.getElementById("progress-panel");
-const progressBar    = document.getElementById("progress-bar");
-const progressMsg    = document.getElementById("progress-message");
+const progressPanel = document.getElementById("progress-panel");
+const progressBar   = document.getElementById("progress-bar");
+const progressMsg   = document.getElementById("progress-message");
+const resultPanel   = document.getElementById("result-panel");
+const downloadLink  = document.getElementById("download-link");
+const startOverBtn  = document.getElementById("start-over-btn");
+const errorPanel    = document.getElementById("error-panel");
+const errorMessage  = document.getElementById("error-message");
+const retryBtn      = document.getElementById("retry-btn");
 
-const resultPanel    = document.getElementById("result-panel");
-const downloadLink   = document.getElementById("download-link");
-const startOverBtn   = document.getElementById("start-over-btn");
+// ── Per-character state ───────────────────────────────────────────────────
+const CHARS = ["bryce", "brian", "carmen"];
+/** @type {Record<string, File[]>} */
+const refImages = { bryce: [], brian: [], carmen: [] };
 
-const errorPanel     = document.getElementById("error-panel");
-const errorMessage   = document.getElementById("error-message");
-const retryBtn       = document.getElementById("retry-btn");
-
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-/** @type {File[]} */
-let selectedImages = [];
-let pollTimer = null;
-
-// ---------------------------------------------------------------------------
-// Utility helpers
-// ---------------------------------------------------------------------------
-function countWords(text) {
-  return text.trim() === "" ? 0 : text.trim().split(/\s+/).length;
-}
-
-function showPanel(panel) {
-  [progressPanel, resultPanel, errorPanel].forEach(p => p.classList.add("hidden"));
-  form.classList.add("hidden");
-  document.querySelector(".submit-row")?.classList.add("hidden");
-  panel.classList.remove("hidden");
-}
-
-function resetUI() {
-  if (pollTimer !== null) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
-  form.classList.remove("hidden");
-  progressPanel.classList.add("hidden");
-  resultPanel.classList.add("hidden");
-  errorPanel.classList.add("hidden");
-  submitBtn.disabled = false;
-}
-
-// ---------------------------------------------------------------------------
-// Audio drop-zone
-// ---------------------------------------------------------------------------
+// ── Audio drop-zone ───────────────────────────────────────────────────────
 setupDropZone(audioDrop, audioInput, {
   onFiles(files) {
-    const mp3 = Array.from(files).find(f => f.name.toLowerCase().endsWith(".mp3"));
+    const mp3 = Array.from(files).find(f => /\.mp3$/i.test(f.name));
     if (!mp3) { alert("Please select an MP3 file."); return; }
-    // Transfer to real input
     const dt = new DataTransfer();
     dt.items.add(mp3);
     audioInput.files = dt.files;
-    audioDrop.classList.add("has-file");
-    audioLabel.textContent = `✅ ${mp3.name}`;
+    setAudioUI(mp3.name);
   },
 });
-
 audioInput.addEventListener("change", () => {
-  if (audioInput.files.length) {
-    audioDrop.classList.add("has-file");
-    audioLabel.textContent = `✅ ${audioInput.files[0].name}`;
-  }
+  if (audioInput.files.length) setAudioUI(audioInput.files[0].name);
 });
-
-// ---------------------------------------------------------------------------
-// Images drop-zone
-// ---------------------------------------------------------------------------
-setupDropZone(imagesDrop, imagesInput, {
-  onFiles(files) {
-    const imgs = Array.from(files).filter(f =>
-      /\.(jpe?g|png|gif|webp)$/i.test(f.name)
-    );
-    if (!imgs.length) { alert("Please select JPG, PNG, GIF or WebP images."); return; }
-    addImages(imgs);
-  },
-});
-
-imagesInput.addEventListener("change", () => {
-  if (imagesInput.files.length) {
-    addImages(Array.from(imagesInput.files));
-    // Reset input so same file can be re-added after removal
-    imagesInput.value = "";
-  }
-});
-
-function addImages(files) {
-  for (const f of files) {
-    if (selectedImages.length >= MAX_IMAGES) break;
-    selectedImages.push(f);
-  }
-  renderPreviews();
+function setAudioUI(name) {
+  audioDrop.classList.add("has-file");
+  audioLabel.textContent = "✅ " + name;
 }
 
-function renderPreviews() {
-  previewGrid.innerHTML = "";
-  selectedImages.forEach((file, idx) => {
+// ── Cast radio cards ──────────────────────────────────────────────────────
+document.querySelectorAll('input[name="cast"]').forEach(r => r.addEventListener("change", updateCast));
+function updateCast() {
+  const val = document.querySelector('input[name="cast"]:checked')?.value ?? "bryce";
+  document.getElementById("ref-brian").classList.toggle("hidden",  !val.includes("brian"));
+  document.getElementById("ref-carmen").classList.toggle("hidden", !val.includes("carmen"));
+  syncRadioCards("cast-cards");
+}
+
+// ── Style radio cards ─────────────────────────────────────────────────────
+document.querySelectorAll('input[name="style"]').forEach(r => r.addEventListener("change", () => syncRadioCards("style-cards")));
+
+function syncRadioCards(containerId) {
+  document.querySelectorAll(`#${containerId} .radio-card`).forEach(card => {
+    card.classList.toggle("selected", card.querySelector("input").checked);
+  });
+}
+
+// Initialise radio card visuals and cast section visibility on page load
+updateCast();
+syncRadioCards("style-cards");
+
+
+CHARS.forEach(char => {
+  const dropEl  = document.getElementById(`${char}-drop`);
+  const inputEl = document.getElementById(`${char}-input`);
+  if (!dropEl || !inputEl) return;
+
+  setupDropZone(dropEl, inputEl, {
+    onFiles(files) { addRefImages(char, Array.from(files).filter(isImage)); },
+  });
+  inputEl.addEventListener("change", () => {
+    if (inputEl.files.length) {
+      addRefImages(char, Array.from(inputEl.files).filter(isImage));
+      inputEl.value = "";
+    }
+  });
+});
+
+function isImage(f) { return /\.(jpe?g|png|webp)$/i.test(f.name); }
+
+function addRefImages(char, files) {
+  refImages[char].push(...files);
+  renderRefPreviews(char);
+}
+
+function renderRefPreviews(char) {
+  const grid    = document.getElementById(`${char}-preview`);
+  const dropEl  = document.getElementById(`${char}-drop`);
+  const labelEl = document.getElementById(`${char}-label`);
+  const countEl = document.getElementById(`${char}-count`);
+  if (!grid) return;
+
+  grid.innerHTML = "";
+  refImages[char].forEach((file, idx) => {
     const thumb = document.createElement("div");
     thumb.className = "preview-thumb";
 
@@ -142,85 +119,65 @@ function renderPreviews() {
     img.src = URL.createObjectURL(file);
     img.alt = file.name;
 
-    const removeBtn = document.createElement("button");
-    removeBtn.className = "remove-btn";
-    removeBtn.type = "button";
-    removeBtn.textContent = "×";
-    removeBtn.setAttribute("aria-label", `Remove ${file.name}`);
-    removeBtn.addEventListener("click", () => {
-      selectedImages.splice(idx, 1);
-      renderPreviews();
+    const rmBtn = document.createElement("button");
+    rmBtn.className = "remove-btn";
+    rmBtn.type = "button";
+    rmBtn.textContent = "×";
+    rmBtn.setAttribute("aria-label", "Remove " + file.name);
+    rmBtn.addEventListener("click", () => {
+      refImages[char].splice(idx, 1);
+      renderRefPreviews(char);
     });
 
     thumb.appendChild(img);
-    thumb.appendChild(removeBtn);
-    previewGrid.appendChild(thumb);
+    thumb.appendChild(rmBtn);
+    grid.appendChild(thumb);
   });
 
-  const count = selectedImages.length;
-  if (count > 0) {
-    imagesDrop.classList.add("has-file");
-    imagesLabel.textContent = `✅ ${count} photo${count !== 1 ? "s" : ""} selected (max ${MAX_IMAGES})`;
-  } else {
-    imagesDrop.classList.remove("has-file");
-    imagesLabel.textContent = `Click or drag & drop up to ${MAX_IMAGES} photos here`;
+  const n = refImages[char].length;
+  const ok = n >= MIN_REF_IMAGES;
+  dropEl.classList.toggle("has-file", ok);
+  labelEl.textContent = n > 0 ? `✅ ${n} photo${n !== 1 ? "s" : ""} selected` : "Click or drag photos here";
+  if (countEl) {
+    countEl.textContent = `${n} / ${MIN_REF_IMAGES}+ photos`;
+    countEl.style.color = ok ? "#3ecf8e" : "var(--accent)";
   }
 }
 
-// ---------------------------------------------------------------------------
-// Word counter
-// ---------------------------------------------------------------------------
-descTextarea.addEventListener("input", updateWordCount);
-
-function updateWordCount() {
-  const wc = countWords(descTextarea.value);
-  wordCountEl.textContent = wc;
-  if (wc > MAX_DESCRIPTION_WORDS) {
-    wordCounter.classList.add("over-limit");
-  } else {
-    wordCounter.classList.remove("over-limit");
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Form submit
-// ---------------------------------------------------------------------------
-form.addEventListener("submit", async (e) => {
+// ── Form submit ───────────────────────────────────────────────────────────
+form.addEventListener("submit", async e => {
   e.preventDefault();
 
-  // Client-side validation
-  if (!audioInput.files.length) {
-    alert("Please upload an MP3 file.");
-    return;
-  }
-  if (selectedImages.length === 0) {
-    alert("Please upload at least one photo.");
-    return;
-  }
-  if (!descTextarea.value.trim()) {
-    alert("Please describe your vision.");
-    return;
-  }
-  if (countWords(descTextarea.value) > MAX_DESCRIPTION_WORDS) {
-    alert(`Description must be ${MAX_DESCRIPTION_WORDS} words or fewer.`);
-    return;
+  if (!audioInput.files.length) { alert("Please upload an MP3 file."); return; }
+
+  const castVal = document.querySelector('input[name="cast"]:checked')?.value ?? "bryce";
+  const requiredChars = ["bryce"];
+  if (castVal.includes("brian"))  requiredChars.push("brian");
+  if (castVal.includes("carmen")) requiredChars.push("carmen");
+
+  for (const char of requiredChars) {
+    if (refImages[char].length < MIN_REF_IMAGES) {
+      const name = char.charAt(0).toUpperCase() + char.slice(1);
+      alert(`Please upload at least ${MIN_REF_IMAGES} reference photos for ${name}.`);
+      return;
+    }
   }
 
   submitBtn.disabled = true;
 
   const fd = new FormData();
   fd.append("audio", audioInput.files[0]);
-  selectedImages.forEach(img => fd.append("images", img));
-  fd.append("description", descTextarea.value);
+  fd.append("cast",  castVal);
+  fd.append("style", document.querySelector('input[name="style"]:checked')?.value ?? "cinematic");
+  fd.append("model", document.getElementById("model-select").value);
+  const lyrics = (document.getElementById("lyrics")?.value ?? "").trim();
+  if (lyrics) fd.append("lyrics", lyrics);
+  for (const char of requiredChars) refImages[char].forEach(img => fd.append(`ref_${char}`, img));
 
   try {
-    const res = await fetch("/generate", { method: "POST", body: fd });
+    const res  = await fetch("/generate", { method: "POST", body: fd });
     const data = await res.json();
-    if (!res.ok) {
-      showError(data.error || "Upload failed. Please try again.");
-      submitBtn.disabled = false;
-      return;
-    }
+    if (!res.ok) { showError(data.error || "Request failed."); submitBtn.disabled = false; return; }
     startPolling(data.job_id);
   } catch (err) {
     showError("Network error: " + err.message);
@@ -228,94 +185,61 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Progress polling
-// ---------------------------------------------------------------------------
+// ── Polling ───────────────────────────────────────────────────────────────
+let pollTimer = null;
+
 function startPolling(jobId) {
-  // Show progress panel immediately
-  showProgressPanel(0, "Starting…");
   form.classList.add("hidden");
+  document.querySelector(".submit-row")?.classList.add("hidden");
   progressPanel.classList.remove("hidden");
+  setProgress(0, "Starting…");
 
   pollTimer = setInterval(async () => {
     try {
       const res = await fetch(`/status/${jobId}`);
-      if (!res.ok) { clearInterval(pollTimer); pollTimer = null; return; }
+      if (!res.ok) return;
       const job = await res.json();
-
-      updateProgress(job.progress, job.message);
-
-      if (job.status === "complete") {
-        clearInterval(pollTimer);
-        pollTimer = null;
-        showResult(jobId);
-      } else if (job.status === "error") {
-        clearInterval(pollTimer);
-        pollTimer = null;
-        showError(job.message);
-      }
-    } catch (_) {
-      // Transient network error – keep polling
-    }
-  }, POLL_INTERVAL_MS);
+      setProgress(job.progress, job.message);
+      if (job.status === "complete") { clearPoll(); showResult(jobId); }
+      else if (job.status === "error") { clearPoll(); showError(job.message); }
+    } catch (_) {}
+  }, POLL_INTERVAL);
 }
 
-function showProgressPanel(pct, msg) {
-  progressPanel.classList.remove("hidden");
-  updateProgress(pct, msg);
-}
-
-function updateProgress(pct, msg) {
+function clearPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+function setProgress(pct, msg) {
   progressBar.style.width = `${pct}%`;
-  progressMsg.textContent = msg || "";
+  progressMsg.textContent = msg ?? "";
 }
 
-// ---------------------------------------------------------------------------
-// Result & error
-// ---------------------------------------------------------------------------
+// ── Result / error ────────────────────────────────────────────────────────
 function showResult(jobId) {
   downloadLink.href = `/download/${jobId}`;
   progressPanel.classList.add("hidden");
   resultPanel.classList.remove("hidden");
 }
-
 function showError(msg) {
   errorMessage.textContent = msg;
   progressPanel.classList.add("hidden");
   errorPanel.classList.remove("hidden");
 }
 
-startOverBtn.addEventListener("click", () => {
-  location.reload();
-});
-
+startOverBtn.addEventListener("click", () => location.reload());
 retryBtn.addEventListener("click", () => {
-  resetUI();
+  clearPoll();
+  form.classList.remove("hidden");
+  [progressPanel, resultPanel, errorPanel].forEach(p => p.classList.add("hidden"));
+  submitBtn.disabled = false;
 });
 
-// ---------------------------------------------------------------------------
-// Generic drop-zone setup
-// ---------------------------------------------------------------------------
+// ── Drop-zone helper ──────────────────────────────────────────────────────
 function setupDropZone(zone, input, { onFiles }) {
-  zone.addEventListener("click", (e) => {
-    if (e.target.closest(".remove-btn")) return;
-    input.click();
-  });
-
-  zone.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    zone.classList.add("drag-over");
-  });
-
-  zone.addEventListener("dragleave", () => {
-    zone.classList.remove("drag-over");
-  });
-
-  zone.addEventListener("drop", (e) => {
+  zone.addEventListener("click",    e  => { if (!e.target.closest(".remove-btn")) input.click(); });
+  zone.addEventListener("dragover", e  => { e.preventDefault(); zone.classList.add("drag-over"); });
+  zone.addEventListener("dragleave",()  => zone.classList.remove("drag-over"));
+  zone.addEventListener("drop",     e  => {
     e.preventDefault();
     zone.classList.remove("drag-over");
-    if (e.dataTransfer.files.length) {
-      onFiles(e.dataTransfer.files);
-    }
+    if (e.dataTransfer.files.length) onFiles(e.dataTransfer.files);
   });
 }
