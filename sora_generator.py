@@ -54,8 +54,28 @@ def generate_scene_clips(
     if some clips could not be generated after retries).
     """
     api_key = os.environ.get("OPENAI_API_KEY", "")
+
+    # Fall back to the stub clip provider when no API key is configured so the
+    # pipeline can run end-to-end without Sora credentials.
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+        from clip_provider import generate_clip as _stub_generate_clip
+        clips_dir_path = Path(clips_dir)
+        clips_dir_path.mkdir(parents=True, exist_ok=True)
+        total = len(scenes)
+        saved_clips: list[str] = []
+        for idx, scene in enumerate(scenes):
+            pct = 20 + int((idx / total) * 68)
+            _cb(progress_callback, pct,
+                f"Generating stub clip {idx + 1}/{total}…")
+            clip_path = str(clips_dir_path / f"clip_{idx:04d}.mp4")
+            _stub_generate_clip(
+                prompt=scene["prompt"],
+                duration=int(scene.get("duration", DEFAULT_DURATION)),
+                resolution=resolution,
+                output_path=clip_path,
+            )
+            saved_clips.append(clip_path)
+        return saved_clips
 
     client = OpenAI(api_key=api_key)
     clips_dir_path = Path(clips_dir)
